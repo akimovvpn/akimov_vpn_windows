@@ -231,9 +231,9 @@ function ticks(g,W){
   }
 }
 let T=0,lastT=performance.now(),frameHandle=0;
-function startAnimation(){if(!frameHandle&&!document.hidden&&S.screen==="home"){lastT=performance.now();frameHandle=requestAnimationFrame(frame)}}
+function startAnimation(){if(S.signed_in&&!frameHandle&&!document.hidden&&S.screen==="home"){lastT=performance.now();frameHandle=requestAnimationFrame(frame)}}
 function frame(now){
-  frameHandle=0;if(document.hidden||S.screen!=="home")return;frameHandle=requestAnimationFrame(frame);const cv=$("#cv");if(!cv)return;
+  frameHandle=0;if(!S.signed_in||document.hidden||S.screen!=="home")return;frameHandle=requestAnimationFrame(frame);const cv=$("#cv");if(!cv)return;
   const dt=Math.min(.05,(now-lastT)/1000);lastT=now;if(!reduced())T+=dt;
   const W=cv.clientWidth,dpr=Math.min(2,devicePixelRatio||1);if(!W)return;if(cv.width!==Math.round(W*dpr))cv.width=cv.height=Math.round(W*dpr);
   const g=cv.getContext("2d");g.setTransform(dpr,0,0,dpr,0,0);g.clearRect(0,0,W,W);
@@ -366,12 +366,13 @@ function renderSide(){
   [...el.children].forEach((c,i)=>c.style.setProperty("--k",i+1));settle(el);
 }
 function render(){
-  const m=$("#main");m.innerHTML=screens[S.screen]();startAnimation();
+  root.dataset.auth=S.signed_in?"signed-in":"signed-out";$("#logo").disabled=!S.signed_in;
+  const screen=S.signed_in?S.screen:"account",m=$("#main");m.innerHTML=screens[screen]();startAnimation();
   [...m.children].forEach((c,i)=>c.style.setProperty("--k",i));
   $$(".stag",m).forEach(s=>[...s.children].forEach((c,i)=>c.style.setProperty("--k",Math.min(i,9)+1)));
-  if(S.screen==="home"){setConn(S.conn);renderSide()}
-  if(S.screen==="conns"&&S.conn==="connected"){connEls.clear();syncConns(true)}
-  if(S.screen==="rules")showMsg();
+  if(S.signed_in&&screen==="home"){setConn(S.conn);renderSide()}
+  if(S.signed_in&&screen==="conns"&&S.conn==="connected"){connEls.clear();syncConns(true)}
+  if(S.signed_in&&screen==="rules")showMsg();
   if(S.deviceBusy)for(const control of $$('[data-act^="dev-"],[data-act="switch"],[data-act="switch-ok"]',m))control.disabled=true;
   settle(m);S.just=null;
   const f=$("#editv")||$("#devname");if(f){f.focus();f.select()}
@@ -380,7 +381,7 @@ function render(){
 function rr(){const m=$("#main");m.classList.remove("enter","leave");const s=snap();render();play(s)}
 let navT=0,enT=0,pendingPaint=null;const entered=()=>{clearTimeout(enT);enT=setTimeout(()=>{$("#main").classList.remove("enter");const screen=pendingPaint;pendingPaint=null;if(screen===S.screen)paintScreen(screen)},1100)};
 function go(v){
-  if(!S.signed_in&&["subs","balance","devices","referral"].includes(v))v="account";
+  if(!S.signed_in)v="account";
   if(v===S.screen)return;const m=$("#main");m.dataset.dir=ORDER.indexOf(v)>ORDER.indexOf(S.screen)?"f":"b";
   S.screen=v;void refreshScreen(v).catch(report);void watchTraffic();S.edit=null;S.scopeFor=null;S.pendingSwitch=null;markNav();clearTimeout(navT);
   const swap=()=>{mem.n={};m.classList.remove("leave","enter");render();m.scrollTop=0;void m.offsetWidth;m.classList.add("enter");entered()};
@@ -491,6 +492,7 @@ const act={
   legal:async()=>{S.sheet="legal";renderSheet();await loadLegal();if(S.sheet==="legal")renderSheet()},
   "legal-retry":()=>loadLegal(true),
   "legal-doc":el=>{const doc=S.legal?.docs[+el.dataset.i];if(doc)return invoke("open_external",{url:doc.url})},
+  "legal-link":async el=>{await loadLegal();const doc=S.legal?.docs.find(d=>d.key===el.dataset.key);if(doc)return invoke("open_external",{url:doc.url});S.sheet="legal";renderSheet()},
   "history-refresh":()=>loadHistory(),
   promo:()=>{if(!S.signed_in)return go("account");S.sheet="promo";renderSheet()},
   "go-devices":()=>{S.pendingSwitch=null;go("devices")},
@@ -523,7 +525,7 @@ const act={
   "dev-edit":el=>{if(S.deviceBusy)return;S.edit="d"+el.dataset.id;rr()}, "dev-ask":el=>{if(S.deviceBusy)return;S.edit="x"+el.dataset.id;rr()},
 
 };
-document.addEventListener("click",e=>{for(const picker of $$(".rule-types[open]"))if(!picker.contains(e.target))picker.open=false;const el=e.target.closest("[data-act]");if(el&&!el.disabled&&act[el.dataset.act])Promise.resolve().then(()=>{if(S.pay?.busy&&el.closest("#sheet"))return;return act[el.dataset.act](el,e)}).catch(report)});
+document.addEventListener("click",e=>{for(const picker of $$(".rule-types[open]"))if(!picker.contains(e.target))picker.open=false;const el=e.target.closest("[data-act]");if(el?.tagName==="A")e.preventDefault();if(el&&!el.disabled&&act[el.dataset.act])Promise.resolve().then(()=>{if(S.pay?.busy&&el.closest("#sheet"))return;return act[el.dataset.act](el,e)}).catch(report)});
 document.addEventListener("input",e=>{const t=e.target;if(t.id==="cval"||t.id==="rawv"){S.comp.value=t.value;showMsg()}if(t.id==="q"){S.q=t.value;syncConns(true)}});
 document.addEventListener("keydown",e=>{
   const t=e.target;
@@ -592,7 +594,7 @@ async function loadLegal(force=false){
   try{
     const result=await api("GET","/legal");
     if(!Array.isArray(result.docs)||result.docs.length>32)throw Error("invalid documents");
-    const docs=result.docs.map(doc=>{const url=new URL(doc.url);if(url.protocol!=="https:"||url.username||url.password||typeof doc.title!=="string"||doc.title.length>300)throw Error("invalid document");return{title:doc.title,url:url.href}});
+    const docs=result.docs.map(doc=>{const url=new URL(doc.url);if(url.protocol!=="https:"||url.username||url.password||typeof doc.title!=="string"||doc.title.length>300)throw Error("invalid document");return{key:String(doc.key||""),title:doc.title,url:url.href}});
     S.legal={docs,version:String(result.version||"").slice(0,128)};
   }catch(error){S.legalError=friendlyError(error)}finally{S.legalLoading=false;if(S.sheet==="legal")renderSheet();paintScreen("settings")}
 }
@@ -664,13 +666,14 @@ async function useSubscription(id){
   catch(error){S.pendingSwitch=null;rr();throw error}
 }
 async function watchTraffic(){await invoke("watch",{on:S.screen==="conns"&&S.conn==="connected"&&!S.paused&&!document.hidden})}
+function legalLink(key,label){const doc=S.legal?.docs.find(d=>d.key===key);return `<a class="legal-link" href="${esc(doc?.url||'#')}" data-act="legal-link" data-key="${key}">${label}</a>`}
 function signInScreen(){
  const mode=S.auth.mode,email=`<label for="email">Email</label><input class="input" id="email" type="email" autocomplete="email" value="${esc(S.auth.email)}" required>`,password=`<label for="password">${mode==='reset'?'New password':'Password'}</label><input class="input" id="password" type="password" minlength="8" maxlength="128" autocomplete="${mode==='login'?'current-password':'new-password'}" required>`;
  const title={login:'Sign in',register:'Create account',verify:'Check your email',forgot:'Reset password',reset:'Set a new password'}[mode];
  let fields=mode==='verify'?`<p class="cap">Enter the six-digit code sent to ${esc(S.auth.email)}.</p><label for="code">Email code</label><input class="input mono" id="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required>`:mode==='reset'?`<p class="cap">If this email belongs to an account, we sent a reset link. Copy that link from your email and paste it here; you do not need to open the website.</p><label for="reset-link">Reset link or token</label><input class="input" id="reset-link" type="text" autocomplete="off" spellcheck="false" required>${password}`:email+(mode==='forgot'?'':password);
- if(mode==='register')fields+=`<label class="consent"><input type="checkbox" id="terms" required> I accept the terms of service.</label><label class="consent"><input type="checkbox" id="personal-data" required> I consent to the processing of my personal data.</label>`;
+ if(mode==='register')fields+=`<label class="consent"><input type="checkbox" id="terms" required><span>I accept the ${legalLink('offer','public offer')} and ${legalLink('terms','terms of service')}.</span></label><label class="consent"><input type="checkbox" id="personal-data" required><span>I consent to ${legalLink('consent','processing of my personal data')} and have read the ${legalLink('privacy','privacy policy')}.</span></label>`;
  const button={login:'Sign in',register:'Create account',verify:'Verify email',forgot:'Send reset link',reset:'Save password'}[mode];
- return head('Account')+`<form id="${mode}" class="card pad auth"><h2 class="h">${title}</h2>${fields}<button class="btn primary block" style="margin-top:20px" type="submit" ${S.authBusy?'disabled':''}>${button}</button>${mode==='login'?'<button class="btn quiet block" type="button" data-act="auth" data-v="register">Create account</button><button class="btn quiet block" type="button" data-act="auth" data-v="forgot">Forgot password?</button>':'<button class="btn quiet block" type="button" data-act="auth" data-v="login">Back to sign in</button>'}${mode==='verify'?`<button class="btn quiet block" type="button" data-act="auth-resend" ${Date.now()<S.auth.retryAt?'disabled':''}>Resend code</button>`:''}<button class="btn quiet block" type="button" data-act="legal">Legal documents</button></form>`;
+ return `<form id="${mode}" class="card pad auth"><h1 class="h">${title}</h1>${fields}<button class="btn primary block" style="margin-top:20px" type="submit" ${S.authBusy?'disabled':''}>${button}</button>${mode==='login'?'<button class="btn quiet block" type="button" data-act="auth" data-v="register">Create account</button><button class="btn quiet block" type="button" data-act="auth" data-v="forgot">Forgot password?</button>':'<button class="btn quiet block" type="button" data-act="auth" data-v="login">Back to sign in</button>'}${mode==='verify'?`<button class="btn quiet block" type="button" data-act="auth-resend" ${Date.now()<S.auth.retryAt?'disabled':''}>Resend code</button>`:''}<button class="btn quiet block" type="button" data-act="legal">Legal documents</button></form>`;
 }
 
 function subscriptionInfo(){
@@ -836,7 +839,7 @@ document.addEventListener('submit',async event=>{
   if(form.id==='login'){result={me:await invoke('cabinet_login',{email,password})}}
   else{let body={email};if(form.id==='register')body={email,password,accept_terms:$('#terms').checked,accept_personal_data:$('#personal-data').checked};if(form.id==='verify')body={email:S.auth.email,code:$('#code').value.trim()};if(form.id==='reset'){let token=$('#reset-link').value.trim();if(/^https?:\/\//i.test(token)){const link=new URL(token);if(link.origin!==new URL(S.cabinet.cabinet_url).origin)throw Error('invalid reset link');token=link.searchParams.get('token')||''}body={token,password}}result=await invoke('cabinet_auth',{action:form.id,body})}
   S.auth.email=email;
-  if(result.me){applyMe(result.me);S.auth.mode='login';engineBoot(await invoke('boot'));await refreshScreen('account');rr()}
+  if(result.me){applyMe(result.me);S.auth.mode='login';engineBoot(await invoke('boot'));go('home');paintScreen('home')}
   else if(form.id==='register'){S.auth.mode='verify';S.auth.email=result.email||email;toast('Check your email for a verification code.');rr()}
   else if(form.id==='forgot'){S.auth.mode='reset';rr()}
  }catch(error){report(error)}finally{S.authBusy=false;if(button.isConnected){button.disabled=false;button.classList.remove('loading')}const current=$('form.auth button[type="submit"]');if(current)current.disabled=false}
@@ -846,6 +849,7 @@ document.addEventListener("change",event=>{if(event.target.id==="topup-amount"&&
 document.addEventListener("visibilitychange",()=>{if(document.hidden){cancelAnimationFrame(frameHandle);frameHandle=0;stopPaymentPoll()}else{startAnimation();if(S.pay?.step==="wait"&&S.sheet==="pay")checkPayment().catch(report);refreshScreen(S.screen).catch(report)}watchTraffic().catch(report)});
 async function boot(){
   readTheme();resample();buildShell();render();$("#main").classList.add("enter");entered();
+  void loadLegal();
   await window.__TAURI__.event.listen("tick",({payload:p})=>{
     S.secs=p.secs;S.dn=p.dn;S.up=p.up;
     [["#timer",clock(p.secs)],["#bt",clock(p.secs)],["#dn",rate(p.dn)],["#up",rate(p.up)],["#bdn",rate(p.dn)],["#bup",rate(p.up)]].forEach(([selector,value])=>{const el=$(selector);if(el)el.textContent=value});
