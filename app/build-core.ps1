@@ -23,27 +23,31 @@ if (!(Test-Path -LiteralPath (Join-Path $source '.git'))) {
     if ($LASTEXITCODE -ne 0) { throw 'Could not isolate the upstream source checkout.' }
 }
 $patch = Join-Path $PSScriptRoot 'core-patches/reality-client.patch'
+$urlPatch = Join-Path $PSScriptRoot 'core-patches/url-test-status.patch'
 Push-Location $source
 try {
-    git apply --check $patch 2>$null
-    if ($LASTEXITCODE -eq 0) {
-        git apply $patch
-        if ($LASTEXITCODE -ne 0) { throw 'Core patch failed.' }
-    } else {
-        git apply --reverse --check $patch
-        if ($LASTEXITCODE -ne 0) { throw 'Core source does not match the patch.' }
+    foreach ($corePatch in @($patch, $urlPatch)) {
+        git apply --check $corePatch 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            git apply $corePatch
+            if ($LASTEXITCODE -ne 0) { throw 'Core patch failed.' }
+        } else {
+            git apply --reverse --check $corePatch
+            if ($LASTEXITCODE -ne 0) { throw 'Core source does not match the patch.' }
+        }
     }
-    & $Go test -buildvcs=false ./component/tls ./adapter/outbound -run 'Test(RealityClientVersions|ModernRealityHelloAndLegacyOptOut)' -count=1
+    & $Go test -buildvcs=false ./component/tls ./adapter/outbound ./adapter -run 'Test(RealityClientVersions|ModernRealityHelloAndLegacyOptOut|URLTestRequiresExpectedStatus)' -count=1
     if ($LASTEXITCODE -ne 0) { throw 'Core tests failed.' }
     New-Item -ItemType Directory -Force $OutputDirectory | Out-Null
     $binary = Join-Path $OutputDirectory 'mihomo-windows-amd64-compatible.exe'
-    & $Go build -buildvcs=false -tags with_gvisor -trimpath -ldflags '-s -w -X github.com/metacubex/mihomo/constant.Version=v1.19.33-akimov.1' -o $binary .
+    & $Go build -buildvcs=false -tags with_gvisor -trimpath -ldflags '-s -w -X github.com/metacubex/mihomo/constant.Version=v1.19.33-akimov.2' -o $binary .
     if ($LASTEXITCODE -ne 0) { throw 'Core build failed.' }
     [ordered]@{
-        version = 'v1.19.33-akimov.1'
+        version = 'v1.19.33-akimov.2'
         upstream = "https://github.com/MetaCubeX/mihomo/tree/v$version"
         source_archive_sha256 = $sourceHash.ToLowerInvariant()
         patch_sha256 = (Get-FileHash -LiteralPath $patch).Hash.ToLowerInvariant()
+        url_test_patch_sha256 = (Get-FileHash -LiteralPath $urlPatch).Hash.ToLowerInvariant()
         binary_sha256 = (Get-FileHash -LiteralPath $binary).Hash.ToLowerInvariant()
         toolchain = (& $Go version)
     } | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $OutputDirectory 'manifest.json')

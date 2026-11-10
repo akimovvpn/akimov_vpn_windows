@@ -1,8 +1,9 @@
 {
-  "version": "v1.19.33-akimov.1",
+  "version": "v1.19.33-akimov.2",
   "upstream": "https://github.com/MetaCubeX/mihomo/tree/v1.19.33",
   "source_archive_sha256": "bb705aa873fc0e9db352fdc69b992c93fad5b310756e0e5f81194a0e0c108e21",
   "patch_sha256": "ee341e3705afa7e8b75b54482f5a3886956780b65489d85d679bcf5c398d0875",
-  "binary_sha256": "433b86ed2bc8f3489d7a66c5bbc0dff3517d8db74ec606e687968593f3145977",
+  "url_test_patch_sha256": "252155980ac47f902b1d6785cc0edd95d750ebdc9822630add4510798dafeee7",
+  "binary_sha256": "1ffb8b4969ace927cfd0d24796d01a3180f249b838bd56e78698d6c89b98f137",
   "toolchain": "go version go1.26.10 windows/amd64"
 }

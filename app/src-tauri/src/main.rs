@@ -3,6 +3,7 @@ mod cabinet;
 mod config;
 mod core;
 mod hwid;
+mod process;
 mod profile;
 mod sysproxy;
 
@@ -241,7 +242,8 @@ fn select_node(e: Eng, name: String) -> Result<Value, String> {
     e.select_node(name)
 }
 #[tauri::command(async)]
-fn test_latency(e: Eng) -> Result<Value, String> {
+fn test_latency(e: Eng, gate: Gate) -> Result<Value, String> {
+    let _guard = gate.0.lock().map_err(|_| "Account operation failed.")?;
     e.test_latency()
 }
 #[tauri::command(async)]
@@ -259,32 +261,6 @@ fn set_close_to_tray(e: Eng, on: bool) -> Result<Value, String> {
 }
 
 #[tauri::command(async)]
-fn elevate(app: tauri::AppHandle) -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
-    let operation = wide("runas");
-    let file = wide(&exe.to_string_lossy());
-    let args = wide(&format!("--wait-parent={} --connect", std::process::id()));
-    let result = unsafe {
-        windows_sys::Win32::UI::Shell::ShellExecuteW(
-            std::ptr::null_mut(),
-            operation.as_ptr(),
-            file.as_ptr(),
-            args.as_ptr(),
-            std::ptr::null(),
-            1,
-        )
-    };
-    if result as usize <= 32 {
-        return Err(
-            "Administrator access was not granted. TUN needs it to create the network adapter."
-                .into(),
-        );
-    }
-    app.exit(0);
-    Ok(())
-}
-#[tauri::command(async)]
 fn watch(e: Eng, on: bool) -> Result<(), String> {
     e.watch(on);
     Ok(())
@@ -296,17 +272,8 @@ fn main() {
         Foundation::{GetLastError, ERROR_ALREADY_EXISTS},
         System::Threading::CreateMutexW,
     };
-    if let Some(pid) = std::env::args().find_map(|arg| {
-        arg.strip_prefix("--wait-parent=")
-            .and_then(|s| s.parse::<u32>().ok())
-    }) {
-        unsafe {
-            let parent = windows_sys::Win32::System::Threading::OpenProcess(0x0010_0000, 0, pid);
-            if !parent.is_null() {
-                windows_sys::Win32::System::Threading::WaitForSingleObject(parent, 10000);
-                windows_sys::Win32::Foundation::CloseHandle(parent);
-            }
-        }
+    if let Some(result) = process::helper() {
+        std::process::exit(if result.is_ok() { 0 } else { 1 });
     }
     let name: Vec<u16> = "Local\\akimov-vpn-app\0".encode_utf16().collect();
     let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
@@ -344,7 +311,6 @@ fn main() {
             set_rules,
             set_mode,
             set_close_to_tray,
-            elevate,
             watch
         ])
         .setup(|app| {

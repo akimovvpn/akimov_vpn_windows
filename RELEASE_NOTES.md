@@ -1,12 +1,15 @@
-akimov vpn 1.0.0 for Windows 10/11 x64.
+akimov vpn 1.0.1 for Windows 10/11 x64.
 
-- Whole-device TUN and browser proxy modes, with owned-core cleanup.
-- Tray operation, mandatory firmware-derived hardware identification, and a locked theme and cabinet endpoint.
-- Plans, devices, Balance transaction history, promo-code slide-over and referrals.
-- Cabinet-provided public offer, terms, privacy policy and personal-data consent links.
-- Server selection and latency tests before connecting, flags, automatic-group health and panel ordering.
-- Bundled mihomo REALITY compatibility patch checked against Xray 26.10.31.
+- Whole-device mode elevates a headless core owner; the app window stays open in place.
+- Saved sessions restore on a neutral loading screen without flashing the sign-in form.
+- Existing active plans load their connection profile automatically before connecting, opening servers, or testing latency.
+- Offline latency testing fixes Windows geodata paths, reuses downloaded routing databases, and resolves server addresses using core DNS.
+- Real HTTPS URL tests verify HTTP 204, retry a second endpoint, and show current measured delays instead of unrelated background timeouts.
+- The connected status keeps the timer and traffic rates without the redundant server subtitle.
+- Connection status now verifies the selected route, and whole-device mode checks actual system routing.
+- Repeated failures share one message; account-service failures no longer claim that the entire Internet is offline.
+- Disconnect and connection cancellation remain available during other work.
 
-Choose **setup.exe** for installation, or extract the portable ZIP and keep its core folder beside the app. The installer is unsigned. The bundled core, Wintun and third-party asset licenses are included; the upstream core source and local patch/build instructions are available alongside the binaries and in this repository.
+Choose setup.exe to install, or extract the portable ZIP with its core folder. The installer is unsigned. Your other VPN is not disabled by this update.
 
-Changing from the earlier installation ID may add one new device entry; the old entry can be removed in Devices. Payment invoices use the provider's browser checkout. The current cabinet API has no correlated confirmation endpoint for top-ups or add-ons, so those payments are not automatically declared successful by the app.
+Bundled core/driver/asset licenses and the core patch are included. The matching upstream core source is included with the release.

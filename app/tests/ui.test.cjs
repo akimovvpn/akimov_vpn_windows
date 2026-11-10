@@ -23,7 +23,7 @@ const context = vm.createContext({document,window:{__TAURI__:{event:{listen:asyn
   calls.push([name,args]);
   if(name==='boot')return {...core};
   if(name==='cabinet_boot')return {configured:true,signed_in:true,base_url:'https://example.invalid/api/v1',cabinet_url:'https://example.invalid',me:structuredClone(me)};
-  if(name==='cabinet_login')return structuredClone(me);
+  if(name==='cabinet_login'){core.has_sub=false;core.sub_id=null;return structuredClone(me);}
   if(name==='cabinet_auth'){if(args.action==='register')return {status:'verification_required',email:args.body.email};if(args.action==='verify'||args.action==='reset')return {status:'signed_in',me:structuredClone(me)};return {status:'reset_sent'}}
   if(name==='refresh_subscription')return {...core,profile:{title:'Fixture profile',total:0,upload:12,download:34,updated_at:1,update_hours:1}};
   if(name==='connect'){if(connectWait)return await connectWait;if(connectError)throw connectError;core.connected=true;return {ms:300}}
@@ -55,6 +55,14 @@ vm.runInContext(source,context);
 const flush = () => new Promise(resolve=>setImmediate(resolve));
 (async()=>{
   await flush();
+  run('engineBoot({...S,has_sub:false,sub_id:77,connected:false});applyMe('+JSON.stringify(me)+')');
+  const missingProfileStart=calls.length;
+  let releaseProfileConnect;connectWait=new Promise(resolve=>releaseProfileConnect=resolve);
+  const missingProfileConnect=run('toggle()');await flush();
+  assert(calls.slice(missingProfileStart).some(([name])=>name==='cabinet_use_subscription'),'a saved plan id without a cached profile must reload its subscription before connecting');
+  assert.equal(run('S.conn'),'connecting','loading a plan must preserve the pending connection state');
+  await run('toggle()');assert.equal(calls.at(-1)[0],'disconnect','a first connection remains cancellable after loading its plan');
+  releaseProfileConnect({ms:10});await missingProfileConnect;connectWait=null;assert.equal(run('S.conn'),'idle');
   assert.equal(run('friendlyError("Internal error (HTTP 503) database failure")'),'Something went wrong. Try again later.');
   assert.equal(run('friendlyError("Wrong email or password. (HTTP 401)")'),'Wrong email or password.');
   assert.equal(run('S.logo'),3);
@@ -118,11 +126,14 @@ const flush = () => new Promise(resolve=>setImmediate(resolve));
   assert.equal(run('S.conn'),'idle','late completion cannot reconnect a canceled attempt');assert.equal(run('S.busy'),false);
   await run('toggle()');
   assert.equal(run('S.conn'),'connected');
+  run('renderStatus()');assert.doesNotMatch(query('#status').innerHTML,/From your subscription|Fixture &lt;server&gt;/,'connected status shows the timer and traffic without the server subtitle');
+  assert.match(run('msHTML({id:"fixture",status:"failed",ms:null})'),/Test failed/);
+  run('S.testing=true');await run('toggle()');assert.equal(run('S.conn'),'idle','latency testing must not block Disconnect');run('S.testing=false');await run('toggle()');
   await run(`go('conns');watchTraffic()`);
   assert(calls.some(([name,args])=>name==='watch'&&args.on));
   await assert.rejects(run(`act.mode({dataset:{v:'proxy'}})`),/Disconnect/);
   await run('toggle()');assert.equal(run('S.conn'),'idle');
-  connectError='admin_required';await run('toggle()');assert.equal(calls.at(-1)[0],'elevate');connectError=null;
+  connectError='elevation_cancelled';await assert.rejects(run('toggle()'),/elevation_cancelled/);assert.equal(run('S.conn'),'idle');assert(!calls.some(([name])=>name==='elevate'),'TUN must never restart the app');connectError=null;
   await run(`act.mode({dataset:{v:'proxy'}})`);assert.equal(calls.at(-1)[0],'set_mode');
   await run('loadDevices(77)');assert.match(run('screens.devices()'),/Test &lt;device&gt;/);assert.match(run('screens.devices()'),/This device/);
   run(`S.edit='down/hwid'`);await run(`saveDevName({dataset:{id:'own/hwid'},value:'New name'})`);
@@ -189,6 +200,9 @@ const flush = () => new Promise(resolve=>setImmediate(resolve));
   query('#reset-link').value='https://example.invalid/reset?token=fixture-reset-token';query('#password').value='another-fixture-password';
   await handlers.submit[0]({target:{id:'reset',querySelector:()=>element()},preventDefault(){}});
   assert(calls.some(([name,args])=>name==='cabinet_auth'&&args.action==='reset'&&args.body.token==='fixture-reset-token'));assert.equal(run('S.signed_in'),true);
+  run('S.signed_in=false;S.activeSub=null');query('#email').value='fixture@example.invalid';query('#password').value='fixture-password';
+  await handlers.submit[0]({target:{id:'login',querySelector:()=>element()},preventDefault(){}});
+  assert.equal(run('S.signed_in'),true);assert.equal(run('S.has_sub'),true,'signing into an existing active plan loads its profile automatically');assert.equal(run('S.engine_sub_id'),run('S.activeSub'));assert(run('NODES.length')>0);
   run('S.has_sub=true;S.screen="settings"');await run('act["subscription-refresh"]()');assert.equal(run('S.profile.title'),'Fixture profile');assert.equal(run('S.profile.total'),0);
   const html=fs.readFileSync(path.join(__dirname,'../ui/index.html'),'utf8');assert.doesNotMatch(html,/<script>(?!\s*$)|fonts\.googleapis|id="brand"|class="proto"/);
   assert.doesNotMatch(source,/setInterval\(tick|pay-sim|function settlePay|anna@example|function seed\(|cabinet_configure|id="service"/);

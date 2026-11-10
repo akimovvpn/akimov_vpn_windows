@@ -374,11 +374,12 @@ pub fn build(
     let mut profile = Mapping::new();
     profile.insert("store-selected".into(), Value::from(true));
     out.insert("profile".into(), Value::Mapping(profile));
-    let dns: Value = if tun {
-        serde_yaml::from_str("enable: true\nipv6: true\nenhanced-mode: fake-ip\nfake-ip-range: 198.19.0.1/16\nrespect-rules: true\ndefault-nameserver: [1.1.1.1, 8.8.8.8]\nproxy-server-nameserver: ['https://1.1.1.1/dns-query', 'https://8.8.8.8/dns-query']\nnameserver: ['https://1.1.1.1/dns-query', 'https://8.8.8.8/dns-query']\n").map_err(|e| e.to_string())?
-    } else {
-        serde_yaml::from_str("enable: false").unwrap()
-    };
+    let mut dns: Value = serde_yaml::from_str("enable: true\nrespect-rules: true\ndefault-nameserver: [1.1.1.1, 8.8.8.8]\nproxy-server-nameserver: ['https://1.1.1.1/dns-query', 'https://8.8.8.8/dns-query']\nnameserver: ['https://1.1.1.1/dns-query', 'https://8.8.8.8/dns-query']\n").map_err(|e| e.to_string())?;
+    dns["ipv6"] = Value::from(tun);
+    dns["enhanced-mode"] = Value::from(if tun { "fake-ip" } else { "redir-host" });
+    if tun {
+        dns["fake-ip-range"] = Value::from("198.19.0.1/16");
+    }
     out.insert("dns".into(), dns);
     let tunnel: Value = serde_yaml::from_str(if tun {
         "enable: true\ndevice: akimov\nstack: mixed\nauto-route: true\nauto-detect-interface: true\nstrict-route: true\nmtu: 1500\ninet6-address: ['fdfe:dcba:9877::1/126']\ndns-hijack: ['any:53', 'tcp://any:53']\n"
@@ -393,6 +394,20 @@ pub fn build(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn proxy_and_latency_use_core_dns_without_changing_system_dns() {
+        let sub =
+            parse("proxies: [{name: Node, type: socks5, server: example.invalid, port: 9}]\n")
+                .unwrap();
+        let built = build(&sub, &[], 1111, 2222, "secret", false).unwrap();
+        let value: Value = serde_yaml::from_str(&built.yaml).unwrap();
+        assert_eq!(value["dns"]["enable"].as_bool(), Some(true));
+        assert!(value["dns"]["listen"].as_str().is_none_or(str::is_empty));
+        assert!(value["dns"]["proxy-server-nameserver"]
+            .as_sequence()
+            .is_some_and(|servers| !servers.is_empty()));
+        assert_eq!(value["tun"]["enable"].as_bool(), Some(false));
+    }
     #[test]
     fn offline_picker_includes_regular_servers_and_keeps_automatic_groups() {
         let sub = parse("proxies:\n- {name: Russia, type: socks5, server: 127.0.0.1, port: 9}\n- {name: Finland, type: socks5, server: 127.0.0.1, port: 9}\n- {name: Finland LTE 1, type: socks5, server: 127.0.0.1, port: 9}\n- {name: Finland LTE 2, type: socks5, server: 127.0.0.1, port: 9}\n- {name: test1, type: socks5, server: 127.0.0.1, port: 9}\nproxy-groups:\n- {name: Main, type: select, include-all: true, exclude-filter: 'LTE [0-9]', proxies: [Auto, Finland LTE auto]}\n- {name: Auto, type: url-test, include-all: true, exclude-filter: Russia, proxies: []}\n- {name: Finland LTE auto, type: url-test, include-all: true, filter: 'Finland LTE [0-9]', proxies: []}\nrules: ['MATCH,Main']").unwrap();

@@ -5,10 +5,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::BufRead;
-use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+#[cfg(test)]
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+#[cfg(test)]
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -41,14 +42,13 @@ struct Settings {
 
 struct Run {
     tun: bool,
-    child: Child,
+    child: crate::process::Process,
     ctl: u16,
     mixed: u16,
     secret: String,
     main: String,
     since: Instant,
     prev: Option<sysproxy::Saved>,
-    _job: OwnedHandle,
 }
 
 struct ProbeDir {
@@ -111,6 +111,17 @@ struct St {
     run: Option<Run>,
 }
 
+struct Latency {
+    revision: u64,
+    checked: Instant,
+    results: HashMap<String, Value>,
+}
+impl Latency {
+    fn fresh(&self, revision: u64) -> bool {
+        self.revision == revision && self.checked.elapsed() < Duration::from_secs(60)
+    }
+}
+
 pub struct Engine {
     st: Mutex<St>,
     gen: AtomicU64,
@@ -118,6 +129,8 @@ pub struct Engine {
     local: ureq::Agent,
     closing: AtomicBool,
     testing: AtomicBool,
+    latency: Mutex<Option<Latency>>,
+    profile_revision: AtomicU64,
 }
 
 pub(crate) fn data_dir() -> PathBuf {
@@ -151,7 +164,7 @@ fn clear_provider_cache() -> Result<(), String> {
     Ok(())
 }
 
-fn core_exe() -> Result<PathBuf, String> {
+pub(crate) fn core_exe() -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let here = exe.parent().map(PathBuf::from).unwrap_or_default();
     let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("core");
@@ -173,7 +186,7 @@ fn free_port() -> Result<u16, String> {
 }
 
 /// Cryptographic randomness from Windows, also used for the device id.
-fn random_hex() -> String {
+pub(crate) fn random_hex() -> String {
     use windows_sys::Win32::Security::Cryptography::{
         BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
     };
@@ -274,6 +287,18 @@ fn proxy_snapshot(v: &Value, main: &str) -> Value {
     json!({"main":main,"now":group["now"],"nodes":nodes})
 }
 
+fn apply_url_measurements(snapshot: &mut Value, measurements: Option<&HashMap<String, Value>>) {
+    if let Some(nodes) = snapshot["nodes"].as_array_mut() {
+        for node in nodes {
+            let measured =
+                measurements.and_then(|values| values.get(node["name"].as_str().unwrap_or("")));
+            node["delay"] = measured.map_or(Value::Null, |value| value["delay"].clone());
+            node["status"] = measured.map_or(json!("unknown"), |value| value["status"].clone());
+            node["url"] = measured.map_or(Value::Null, |value| value["url"].clone());
+        }
+    }
+}
+
 fn cached_proxy_snapshot(
     text: &str,
     rules: &[config::Rule],
@@ -306,31 +331,6 @@ fn cached_proxy_snapshot(
     Ok(json!({"main":built.main,"now":now,"nodes":nodes}))
 }
 
-/// Kill the core when our process ends for any reason, including a crash.
-fn tie_to_us(child: &Child) -> Result<OwnedHandle, String> {
-    use windows_sys::Win32::System::JobObjects::*;
-    unsafe {
-        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-        if job.is_null() {
-            return Err(std::io::Error::last_os_error().to_string());
-        }
-        let owned = OwnedHandle::from_raw_handle(job as _);
-        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        if SetInformationJobObject(
-            job,
-            JobObjectExtendedLimitInformation,
-            &info as *const _ as *const _,
-            std::mem::size_of_val(&info) as u32,
-        ) == 0
-            || AssignProcessToJobObject(job, child.as_raw_handle() as _) == 0
-        {
-            return Err(std::io::Error::last_os_error().to_string());
-        }
-        Ok(owned)
-    }
-}
-
 impl Engine {
     pub fn new() -> Self {
         let mut settings: Settings = std::fs::read_to_string(data_dir().join("settings.json"))
@@ -357,6 +357,8 @@ impl Engine {
             local,
             closing: AtomicBool::new(false),
             testing: AtomicBool::new(false),
+            latency: Mutex::new(None),
+            profile_revision: AtomicU64::new(0),
         }
     }
 
@@ -408,7 +410,6 @@ impl Engine {
             "mode": if st.settings.mode.is_empty() { "tun" } else { &st.settings.mode },
             "close_to_tray": !st.settings.quit_on_close,
             "admin": is_admin(),
-            "connect_on_boot": std::env::args().any(|a| a == "--connect"),
             "hwid": st.settings.hwid,
             "hwid_required": true,
             "hwid_available": crate::hwid::valid(&st.settings.hwid),
@@ -443,6 +444,7 @@ impl Engine {
             .map_err(|e| e.to_string())?;
         st.settings.sub_url = url.to_string();
         st.settings.profile = metadata;
+        self.invalidate_latency();
         st.settings.profile_hwid = hwid;
         save(&st.settings)?;
         Ok(json!({ "ok": true, "nodes": built.nodes }))
@@ -504,6 +506,7 @@ impl Engine {
                 st.settings.mode == "tun",
             )?;
         }
+        self.invalidate_latency();
         let old_metadata = std::mem::replace(&mut st.settings.profile, metadata);
         let old_profile_hwid = std::mem::replace(&mut st.settings.profile_hwid, hwid);
         let temp = path.with_extension("tmp");
@@ -554,10 +557,59 @@ impl Engine {
         self.ensure_profile_hwid()?;
         let (result, generation) = self.start_attempt(attempt)?;
         if let Some(gen) = generation {
+            if let Err(error) = self.verify_connection() {
+                let _ = self.stop(Some(gen));
+                return Err(error);
+            }
+            if self.gen.load(SeqCst) != gen {
+                return Err("Connection cancelled.".into());
+            }
             let me = self.clone();
             std::thread::spawn(move || me.ticker(app, gen));
         }
         Ok(result)
+    }
+
+    fn verify_connection(&self) -> Result<(), String> {
+        let measured = self.test_latency()?;
+        let selected = measured["now"].as_str().ok_or("vpn_unreachable")?;
+        if !measured["nodes"].as_array().is_some_and(|nodes| {
+            nodes
+                .iter()
+                .any(|node| node["name"] == selected && node["status"] == "ok")
+        }) {
+            return Err("vpn_unreachable".into());
+        }
+        let tun = self
+            .st
+            .lock()
+            .unwrap()
+            .run
+            .as_ref()
+            .is_some_and(|run| run.tun);
+        if tun {
+            let tls = native_tls::TlsConnector::new()
+                .map_err(|_| "Whole-device connection could not be checked.")?;
+            let agent = ureq::AgentBuilder::new()
+                .tls_connector(Arc::new(tls))
+                .try_proxy_from_env(false)
+                .timeout(Duration::from_secs(8))
+                .build();
+            if ![
+                "https://www.gstatic.com/generate_204",
+                "https://cp.cloudflare.com/generate_204",
+            ]
+            .iter()
+            .any(|url| {
+                agent
+                    .get(url)
+                    .call()
+                    .is_ok_and(|response| response.status() == 204)
+            }) {
+                return Err("tun_unreachable".into());
+            }
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -582,9 +634,6 @@ impl Engine {
         }
         let dir = data_dir();
         let tun = st.settings.mode == "tun" || st.settings.mode.is_empty();
-        if tun && !is_admin() {
-            return Err("admin_required".into());
-        }
         sysproxy::recover(&dir.join("proxy-recovery.json")).map_err(|e| e.to_string())?;
         let text = std::fs::read_to_string(dir.join("sub.yaml"))
             .map_err(|_| "no_subscription".to_string())?;
@@ -598,26 +647,13 @@ impl Engine {
         let built = config::build(&sub, &st.settings.rules, mixed, ctl, &secret, tun)?;
         let cfg = dir.join("core").join("config.yaml");
         std::fs::write(&cfg, &built.yaml).map_err(|e| e.to_string())?;
-        let log = std::fs::File::create(dir.join("core/core.log")).map_err(|e| e.to_string())?;
-        let mut child = Command::new(core_exe()?)
-            .arg("-d")
-            .arg(dir.join("core"))
-            .arg("-f")
-            .arg(&cfg)
-            .stdin(Stdio::null())
-            .stdout(log.try_clone().map_err(|e| e.to_string())?)
-            .stderr(log)
-            .creation_flags(0x0800_0000) // no console window
-            .spawn()
-            .map_err(|e| format!("Could not start the core: {e}"))?;
-        let job = match tie_to_us(&child) {
-            Ok(job) => job,
-            Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(e);
-            }
-        };
+        let mut child = crate::process::Process::spawn(
+            &core_exe()?,
+            &dir.join("core"),
+            &cfg,
+            &dir.join("core/core.log"),
+            tun && !is_admin(),
+        )?;
         // connected means the controller answers; poll fast so a warm start takes a fraction of a second
         let deadline = Instant::now() + Duration::from_secs(25);
         loop {
@@ -686,7 +722,6 @@ impl Engine {
             main: built.main.clone(),
             since: Instant::now(),
             prev,
-            _job: job,
         });
         let gen = self.gen.fetch_add(1, SeqCst) + 1;
         drop(st);
@@ -843,6 +878,7 @@ impl Engine {
         clear_provider_cache()?;
         st.settings.sub_id = None;
         st.settings.sub_url.clear();
+        self.invalidate_latency();
         st.settings.profile = crate::profile::Metadata::default();
         st.settings.node.clear();
         save(&st.settings)
@@ -853,11 +889,15 @@ impl Engine {
             let st = self.st.lock().unwrap();
             let text = std::fs::read_to_string(data_dir().join("sub.yaml"))
                 .map_err(|_| "Choose a subscription to load its servers.")?;
-            return cached_proxy_snapshot(&text, &st.settings.rules, &st.settings.node);
+            let mut snapshot = cached_proxy_snapshot(&text, &st.settings.rules, &st.settings.node)?;
+            drop(st);
+            self.measured_snapshot(&mut snapshot);
+            return Ok(snapshot);
         };
         let v = self.api(ctl, &secret, "GET", "/proxies", None, 4)?;
         let mut snapshot = proxy_snapshot(&v, &main);
         self.order_nodes(&mut snapshot);
+        self.measured_snapshot(&mut snapshot);
         Ok(snapshot)
     }
 
@@ -895,8 +935,9 @@ impl Engine {
             let st = self.st.lock().unwrap();
             (st.settings.rules.clone(), st.settings.node.clone())
         };
-        let base = data_dir().canonicalize().map_err(|e| e.to_string())?;
-        let text = std::fs::read_to_string(base.join("sub.yaml"))
+        let directory = data_dir();
+        let base = directory.canonicalize().map_err(|e| e.to_string())?;
+        let text = std::fs::read_to_string(directory.join("sub.yaml"))
             .map_err(|_| "Choose a subscription to load its servers.")?;
         let mixed = free_port()?;
         let mut ctl = free_port()?;
@@ -905,32 +946,26 @@ impl Engine {
         }
         let secret = random_hex();
         let built = config::build(&config::parse(&text)?, &rules, mixed, ctl, &secret, false)?;
-        let path = base.join(format!("latency-{}", random_hex()));
+        // Go's geodata loader cannot join filenames onto Windows verbatim (\\?\) paths.
+        let path = directory.join(format!("latency-{}", random_hex()));
         std::fs::create_dir(&path).map_err(|e| e.to_string())?;
         let files = ProbeDir { path, base };
+        for name in ["geoip.metadb", "Country.mmdb", "GeoIP.dat", "GeoSite.dat"] {
+            let cached = directory.join("core").join(name);
+            if cached.is_file() {
+                std::fs::copy(cached, files.path.join(name))
+                    .map_err(|_| "Could not prepare the server test.")?;
+            }
+        }
         let cfg = files.path.join("config.yaml");
         std::fs::write(&cfg, &built.yaml).map_err(|e| e.to_string())?;
-        let mut child = Command::new(core_exe()?)
-            .args([
-                "-d",
-                files.path.to_str().ok_or("Invalid profile directory.")?,
-                "-f",
-                cfg.to_str().ok_or("Invalid profile directory.")?,
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .creation_flags(0x0800_0000)
-            .spawn()
-            .map_err(|_| "Could not test servers. Try again later.")?;
-        let job = match tie_to_us(&child) {
-            Ok(job) => job,
-            Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(e);
-            }
-        };
+        let child = crate::process::Process::spawn(
+            &core_exe()?,
+            &files.path,
+            &cfg,
+            &data_dir().join("core/latency.log"),
+            false,
+        )?;
         let mut probe = Probe {
             run: Run {
                 tun: false,
@@ -941,11 +976,10 @@ impl Engine {
                 main: built.main,
                 since: Instant::now(),
                 prev: None,
-                _job: job,
             },
             _files: files,
         };
-        while probe.run.since.elapsed() < Duration::from_secs(5) {
+        while probe.run.since.elapsed() < Duration::from_secs(25) {
             if self.closing.load(SeqCst) {
                 return Err("The app is closing.".into());
             }
@@ -1015,11 +1049,52 @@ impl Engine {
         Ok(json!({ "ok": true }))
     }
 
+    fn invalidate_latency(&self) {
+        let mut saved = self.latency.lock().unwrap();
+        self.profile_revision.fetch_add(1, SeqCst);
+        *saved = None;
+    }
+    fn measured_snapshot(&self, snapshot: &mut Value) {
+        let saved = self.latency.lock().unwrap();
+        let fresh = saved
+            .as_ref()
+            .filter(|values| values.fresh(self.profile_revision.load(SeqCst)));
+        apply_url_measurements(snapshot, fresh.map(|values| &values.results));
+    }
+
+    fn measure_proxy(&self, ctl: u16, secret: &str, name: &str) -> Value {
+        for url in [
+            "https://www.gstatic.com/generate_204",
+            "https://cp.cloudflare.com/generate_204",
+        ] {
+            if let Ok(result) = self.api(
+                ctl,
+                secret,
+                "GET",
+                &format!(
+                    "/proxies/{}/delay?url={}&timeout=8000&expected=204",
+                    enc(name),
+                    enc(url)
+                ),
+                None,
+                10,
+            ) {
+                if result["delay"].as_u64().is_some_and(|delay| delay > 0) {
+                    return json!({"delay":result["delay"],"status":"ok","url":url});
+                }
+            }
+        }
+        json!({"delay":null,"status":"failed","url":null})
+    }
+
     pub fn test_latency(&self) -> Result<Value, String> {
         if self.testing.swap(true, SeqCst) {
             return Err("A latency test is already running.".into());
         }
         let _testing = Testing(&self.testing);
+        self.ensure_profile_hwid()?;
+        let generation = self.gen.load(SeqCst);
+        let revision = self.profile_revision.load(SeqCst);
         let probe;
         let (ctl, secret, main) = if let Some((ctl, secret, main, _)) = self.running() {
             (ctl, secret, main)
@@ -1032,41 +1107,68 @@ impl Engine {
             )
         };
         let snapshot = self.api(ctl, &secret, "GET", "/proxies", None, 4)?;
-        let groups: Vec<_> = snapshot["proxies"]
-            .as_object()
+        let all = &snapshot["proxies"];
+        let visible: Vec<String> = all[&main]["all"]
+            .as_array()
             .into_iter()
             .flatten()
-            .filter(|(_, p)| {
-                matches!(
-                    p["type"].as_str(),
-                    Some("URLTest" | "Fallback" | "LoadBalance")
-                )
-            })
-            .map(|(name, _)| name.clone())
+            .filter_map(Value::as_str)
+            .map(str::to_string)
             .collect();
-        // Probe automatic groups' members before measuring the manual selector through their selected route.
-        std::thread::scope(|scope| {
-            for batch in groups.chunks(8) {
-                let jobs: Vec<_> = batch.iter().map(|name| { let secret = &secret; scope.spawn(move || self.api(ctl, secret, "GET", &format!("/group/{}/delay?url=https%3A%2F%2Fwww.gstatic.com%2Fgenerate_204&timeout=3000", enc(name)), None, 8)) }).collect();
-                for job in jobs {
-                    let _ = job.join();
-                }
+        let mut pending = visible.clone();
+        let mut seen = std::collections::HashSet::new();
+        let mut leaves = Vec::new();
+        while let Some(name) = pending.pop() {
+            if !seen.insert(name.clone()) {
+                continue;
             }
-        });
-        let _ = self.api(
-            ctl,
-            &secret,
-            "GET",
-            &format!(
-                "/group/{}/delay?url=https%3A%2F%2Fwww.gstatic.com%2Fgenerate_204&timeout=3000",
-                enc(&main)
-            ),
-            None,
-            12,
-        );
+            if let Some(members) = all[&name]["all"].as_array() {
+                pending.extend(members.iter().filter_map(Value::as_str).map(str::to_string));
+            } else {
+                leaves.push(name);
+            }
+        }
+        let groups: Vec<_> = visible
+            .into_iter()
+            .filter(|name| all[name]["all"].is_array())
+            .collect();
+        let results = Mutex::new(HashMap::new());
+        // Test each leaf once; slow hosts do not hold up the next available worker.
+        for targets in [&leaves, &groups] {
+            let next = std::sync::atomic::AtomicUsize::new(0);
+            std::thread::scope(|scope| {
+                for _ in 0..16.min(targets.len()) {
+                    let (next, results, secret) = (&next, &results, &secret);
+                    scope.spawn(move || loop {
+                        if self.closing.load(SeqCst) || self.gen.load(SeqCst) != generation {
+                            break;
+                        }
+                        let Some(name) = targets.get(next.fetch_add(1, SeqCst)) else {
+                            break;
+                        };
+                        let measured = self.measure_proxy(ctl, secret, name);
+                        results.lock().unwrap().insert(name.clone(), measured);
+                    });
+                }
+            });
+        }
+        if self.closing.load(SeqCst) || self.gen.load(SeqCst) != generation {
+            return Err("Test cancelled.".into());
+        }
+        let results = results.into_inner().unwrap();
         let mut result =
             proxy_snapshot(&self.api(ctl, &secret, "GET", "/proxies", None, 4)?, &main);
+        apply_url_measurements(&mut result, Some(&results));
         self.order_nodes(&mut result);
+        let mut saved = self.latency.lock().unwrap();
+        if self.profile_revision.load(SeqCst) != revision {
+            return Err("Test cancelled.".into());
+        }
+        *saved = Some(Latency {
+            revision,
+            checked: Instant::now(),
+            results,
+        });
         Ok(result)
     }
 
@@ -1157,6 +1259,33 @@ impl Engine {
 mod tests {
     use super::*;
     #[test]
+    fn latency_from_a_previous_profile_is_never_reused() {
+        let old = Latency {
+            revision: 1,
+            checked: Instant::now(),
+            results: HashMap::new(),
+        };
+        assert!(old.fresh(1));
+        assert!(
+            !old.fresh(2),
+            "a new profile must not inherit results for reused node names"
+        );
+    }
+    #[test]
+    fn fresh_url_results_replace_unrelated_background_timeouts() {
+        let mut snapshot = json!({"nodes":[{"name":"Working","delay":null,"status":"timeout"},{"name":"Unmeasured","delay":12,"status":"ok"}]});
+        let measured = HashMap::from([(
+            "Working".to_string(),
+            json!({"delay":29,"status":"ok","url":"https://example.invalid/check"}),
+        )]);
+        apply_url_measurements(&mut snapshot, Some(&measured));
+        assert_eq!(snapshot["nodes"][0]["delay"], 29);
+        assert_eq!(snapshot["nodes"][0]["status"], "ok");
+        assert_eq!(snapshot["nodes"][1]["status"], "unknown");
+        apply_url_measurements(&mut snapshot, None);
+        assert_eq!(snapshot["nodes"][0]["status"], "unknown");
+    }
+    #[test]
     fn cached_picker_preserves_groups_order_and_saved_choice_without_starting_core() {
         let sub = "proxies:\n- {name: First, type: direct}\n- {name: Second, type: direct}\nproxy-groups:\n- {name: Main, type: select, proxies: [First, Second]}\nrules: ['MATCH,Main']";
         let v = cached_proxy_snapshot(sub, &[], "Second").unwrap();
@@ -1184,6 +1313,31 @@ mod tests {
         assert_eq!(result["nodes"][1]["status"], "unknown");
         assert_eq!(result["nodes"][2]["status"], "timeout");
     }
+    #[test]
+    #[ignore = "Uses the signed-in user's cached subscription for real latency requests; changes no routes"]
+    fn windows_cached_subscription_latency() {
+        let engine = Engine::new();
+        let snapshot = engine
+            .test_latency()
+            .expect("Cached subscription latency startup failed");
+        let nodes = snapshot["nodes"].as_array().unwrap();
+        let working = nodes.iter().filter(|node| node["status"] == "ok").count();
+        println!("Measured {} servers; {working} working routes", nodes.len());
+        println!(
+            "Selected route health: {}",
+            nodes
+                .iter()
+                .find(|node| node["name"] == snapshot["now"])
+                .map(|node| node["status"].clone())
+                .unwrap_or(Value::Null)
+        );
+        assert!(working > 0, "No working route in the cached subscription");
+        assert!(
+            engine.st.lock().unwrap().run.is_none(),
+            "Latency must leave the VPN disconnected"
+        );
+    }
+
     #[test]
     #[ignore = "Requires administrator consent; creates a real Windows TUN adapter"]
     fn windows_tun_smoke() {

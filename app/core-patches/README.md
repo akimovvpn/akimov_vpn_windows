@@ -1,6 +1,6 @@
 # Bundled mihomo changes
 
-This package uses mihomo v1.19.33 with `reality-client.patch`, built with Go 1.26.10 and `with_gvisor`. The manifest records the source archive, patch and binary hashes. Rebuild with `./build-core.ps1`; Go and Git are required. Then build the Windows app with `./build.ps1`.
+This package uses mihomo v1.19.33 with `reality-client.patch` and `url-test-status.patch`, built with Go 1.26.10 and `with_gvisor`. The manifest records the source archive, patch and binary hashes. Rebuild with `./build-core.ps1`; Go and Git are required. Then build the Windows app with `./build.ps1`.
 
 Modern REALITY servers require X25519MLKEM768. Upstream mihomo disables it by default, and its older Firefox fingerprint does not contain the hybrid share. The patch defaults to hybrid REALITY and uses the Chrome fingerprint when the requested fingerprint cannot supply that share. Explicit `support-x25519mlkem768: false` retains the legacy handshake. Certificate and REALITY authentication checks remain enabled.
 
@@ -10,4 +10,6 @@ References: [REALITY hybrid requirement](https://github.com/XTLS/REALITY/commit/
 
 `tests/core-interop.cjs` transfers an HTTP response through a local Xray 26.10.31 REALITY/Vision server with minimum client version 26.3.27, using Chrome and Firefox configurations. It uses no user profile, system proxy or TUN adapter. Prepare the pinned Xray binary in `.tools/xray/xray.exe` and the local TLS fixture using `tests/prepare-interop.ps1`, then run `node tests/core-interop.cjs`. `--expect-failure` checks an unpatched core baseline.
 
-The upstream source and this patch are GPL-3.0; see the bundled mihomo license.
+The URL-test patch rejects responses outside the requested expected HTTP status instead of returning a positive delay for a blocked page. The local Go test checks HTTP 204 success and HTTP 200/403/302 failures. The app tests each unique server through HTTPS, retries a second public 204 endpoint on failure, and keeps those measured results separate from background health histories.
+
+The upstream source and these patches are GPL-3.0; see the bundled mihomo license.

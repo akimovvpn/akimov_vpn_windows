@@ -71,7 +71,7 @@ let uid=10;
 const S={v:1,logo:3,screen:"home",conn:"idle",secs:0,mode:"tun",node:"",balance:0,activeSub:null,pendingSwitch:null,
   subs:[],devices:{},deviceLoaded:{},rules:[],conns:[],paused:false,filter:"all",q:"",scopeFor:null,applied:"Applied",
   comp:{type:"DOMAIN-SUFFIX",value:"",target:"@direct",raw:false},pay:null,sheet:null,edit:null,just:null,
-  auth:{mode:"login",email:"",retryAt:0},authBusy:false,me:null,cabinet:null,has_sub:false,hwid:"",busy:false,version:"",signed_in:false,
+  auth:{mode:"login",email:"",retryAt:0},authBusy:false,restoring:true,me:null,cabinet:null,has_sub:false,hwid:"",busy:false,version:"",signed_in:false,
   transactions:null,historyLoading:false,historyError:"",legal:null,legalLoading:false,legalError:""};
 let historyGeneration=0;
 const flagCodes=new Set(["EU","EE","LV","LT","FI","SE","PL","NL","DE","FR","GB","US","RU","TR","UA","KZ","CH","AT","BE","CZ","DK","NO","ES","IT","PT","IE","RO","CA","AU","JP","SG","HK","IN","GE","AM","IL","AE"]);
@@ -154,7 +154,9 @@ function parseRaw(line){
 
 /* ── toasts ───────────────────────────────────────────────────────────── */
 function toast(text,actions=[]){
+  if([...$("#toasts").children].some(el=>el.dataset.message===text&&!el.classList.contains("out")))return;
   const el=document.createElement("div");el.className="toast";el.innerHTML=`<span>${esc(text)}</span>`;
+  el.dataset.message=text;
   const out=()=>{if(!el.isConnected)return;el.classList.add("out");setTimeout(()=>el.remove(),200)};
   actions.forEach(([label,fn])=>{const b=document.createElement("button");b.className="btn sm quiet";b.textContent=label;b.onclick=()=>{fn();out()};el.append(b)});
   $("#toasts").append(el);setTimeout(out,actions.length?8000:3600);
@@ -175,19 +177,18 @@ async function toggle(){
     if(S.conn==="connecting"){const attempt=++connectAttempt;await invoke("disconnect");if(attempt===connectAttempt){S.busy=false;S.conns=[];connEls.clear();setConn("idle");if(S.screen==="home")renderSide()}}
     return;
   }
+  if(S.conn!=="connected"&&(S.testing||S.refreshing))return;
   if(!S.signed_in&&S.conn!=="connected"){go("account");return}
-  if(S.conn!=="connected"&&S.signed_in&&sub()?.status==="active"&&S.engine_sub_id!==S.activeSub)await useSubscription(S.activeSub);
-  if(S.conn!=="connected"&&!S.has_sub){go(S.signed_in?"subs":"account");return}
   const attempt=++connectAttempt;S.busy=true;const connected=S.conn==="connected";setConn(connected?"connected":"connecting");
-  try{await invoke(connected?"disconnect":"connect");if(attempt!==connectAttempt)return;S.secs=0;S.conns=[];connEls.clear();setConn(connected?"idle":"connected");if(!connected)await loadNodes().catch(report);await watchTraffic()}
-  catch(error){if(attempt!==connectAttempt)return;if(String(error)==="admin_required"){setConn("idle");await invoke("elevate")}else{setConn("idle");throw error}}
+  try{if(!connected&&!await ensureSubscription()){setConn("idle");go("subs");return}if(attempt!==connectAttempt)return;await invoke(connected?"disconnect":"connect");if(attempt!==connectAttempt)return;S.secs=0;S.conns=[];connEls.clear();setConn(connected?"idle":"connected");if(!connected)await loadNodes().catch(report);await watchTraffic()}
+  catch(error){if(attempt!==connectAttempt)return;setConn("idle");throw error}
   finally{if(attempt===connectAttempt){S.busy=false;if(S.screen==="home")renderSide()}}
 }
 function renderStatus(){
-  const el=$("#status");if(!el)return;const b=blockReason(),n=exitNode(),w=$("#stword");
+  const el=$("#status");if(!el)return;const b=blockReason(),w=$("#stword");
   if(w)w.innerHTML=`<span class="swap">${{idle:"OFF",connecting:"···",connected:"ON",blocked:"NO"}[S.conn]}</span>`;
   if(S.conn==="blocked"&&b)el.innerHTML=`<div class="swap"><div class="s1" style="color:var(--warn)">${esc(b.t)}</div><div class="row" style="margin-top:10px;flex-wrap:wrap">${b.a.map(([l,a],i)=>`<button class="btn ${i?"":"primary"}" data-act="${a}">${l}</button>`).join("")}</div></div>`;
-  else if(S.conn==="connected")el.innerHTML=`<div class="swap"><div class="s1">Connected</div><div class="timer" id="timer">${clock(S.secs)}</div><div class="s2">${S.node==="auto"?"Automatic · ":""}${esc(n.name)} ${n.sub}</div><div class="spd mono"><span>↓ <b id="dn">0</b></span><span>↑ <b id="up">0</b></span></div></div>`;
+  else if(S.conn==="connected")el.innerHTML=`<div class="swap"><div class="s1">Connected</div><div class="timer" id="timer">${clock(S.secs)}</div><div class="spd mono"><span>↓ <b id="dn">0</b></span><span>↑ <b id="up">0</b></span></div></div>`;
   else if(S.conn==="connecting")el.innerHTML=`<div class="swap"><div class="s1">Connecting…</div><div class="s2">Press again to cancel</div></div>`;
   else el.innerHTML=`<div class="swap"><div class="s1">Not connected</div><div class="s2">Tap to connect</div></div>`;
 }
@@ -365,8 +366,8 @@ function renderSide(){
   [...el.children].forEach((c,i)=>c.style.setProperty("--k",i+1));settle(el);
 }
 function render(){
-  root.dataset.auth=S.signed_in?"signed-in":"signed-out";$("#logo").disabled=!S.signed_in;
-  const screen=S.signed_in?S.screen:"account",m=$("#main");m.innerHTML=screens[screen]();startAnimation();
+  root.dataset.auth=S.restoring?"restoring":S.signed_in?"signed-in":"signed-out";$("#logo").disabled=S.restoring||!S.signed_in;
+  const screen=S.signed_in?S.screen:"account",m=$("#main");m.innerHTML=S.restoring?'<section class="startup" role="status" aria-live="polite"><span class="startup-dot"></span><p class="cap dim">Opening your account…</p></section>':screens[screen]();startAnimation();
   [...m.children].forEach((c,i)=>c.style.setProperty("--k",i));
   $$(".stag",m).forEach(s=>[...s.children].forEach((c,i)=>c.style.setProperty("--k",Math.min(i,9)+1)));
   if(S.signed_in&&screen==="home"){setConn(S.conn);renderSide()}
@@ -453,7 +454,7 @@ const STEP={plan:0,method:1,wait:2,done:3,fail:3};
 function promoBody(){return{title:"Promo code",body:`<form id="promo" class="col"><label for="promo-code" class="cap">Enter your code</label><input class="input mono" id="promo-code" autocomplete="off" spellcheck="false" maxlength="64" required><p class="cap dim">A code can add balance, days or a discount to your account.</p><button class="btn primary block" type="submit">Apply code</button></form>`,foot:""}}
 /* Real account and checkout adapters below keep the prototype's sheet animation plumbing. */
 
-const msHTML=n=>n.id==="auto"?"":`<span class="mono ms" data-ms="${esc(n.id)}" style="color:var(--${n.status==="timeout"?"bad":n.ms==null?"ink3":n.ms<120?"ok":"warn"})">${n.ms==null?(n.status==="timeout"?"timeout":"Not tested"):n.ms+" ms"}</span>`;
+const msHTML=n=>n.id==="auto"?"":`<span class="mono ms" data-ms="${esc(n.id)}" title="${n.url?"URL test: "+esc(n.url):"URL test has not completed successfully"}" style="color:var(--${["timeout","failed"].includes(n.status)?"bad":n.ms==null?"ink3":n.ms<120?"ok":"warn"})">${n.ms==null?(n.status==="failed"?"Test failed":n.status==="timeout"?"timeout":"Not tested"):n.ms+" ms"}</span>`;
 function nodesBody(){
   return{title:"Choose a node",body:`<div class="col" style="gap:8px">${NODES.map(n=>`<button class="opt ${S.just==="n"+n.id?"just":""}" data-act="node" data-v="${esc(n.id)}" aria-pressed="${S.node===n.id}">${tickEl}<span class="cc">${nodeFlag(n.id)}</span><span class="grow"><span style="font-weight:600;display:block">${esc(n.name)}</span><span class="cap dim">${esc(n.sub)}</span></span>${msHTML(n)}</button>`).join("")}</div>`,
     foot:`<div class="row"><button class="btn grow" data-act="subscription-refresh" ${S.refreshing||S.testing?"disabled":""}>${S.refreshing?"Updating…":"Update subscription"}</button><button class="btn grow ${S.testing?"loading":""}" data-act="test" ${S.testing||S.refreshing?"disabled":""}>${S.testing?"Testing…":"Test latency"}</button></div>${S.conn!=="connected"?'<p class="cap dim">Your choice will be used when you connect.</p>':""}`};
@@ -567,7 +568,11 @@ function friendlyError(error){
  if(/disconnect before/i.test(text))return 'Disconnect first, then try again.';
  if(/administrator|admin_required/i.test(text))return 'Administrator access is needed for whole-device mode.';
  if(/unlimited|maximum device/i.test(text))return 'This plan already has the maximum allowance.';
- if(/network|connection failed|could not reach|internet/i.test(text))return 'Could not connect. Check your internet and try again.';
+ if(/cabinet.*connection|account service/i.test(text))return 'Your account could not be refreshed. Try again shortly.';
+ if(/vpn_unreachable/i.test(text))return 'This server is not responding. Choose another server or try again.';
+ if(/tun_unreachable/i.test(text))return 'Whole-device routing could not be started. Try connecting again.';
+ if(/elevation_cancelled/i.test(text))return 'Allow Windows administrator access to use whole-device mode.';
+ if(/network|connection failed|could not reach|internet/i.test(text))return 'The connection could not be completed. Try again shortly.';
  return 'Something went wrong. Try again later.';
 }
 function report(error){const raw=String(error?.message||error);toast(friendlyError(error));if(/HTTP 401|not signed in|sign in again/i.test(raw)){S.signed_in=false;S.me=null;S.subs=[];S.devices={};S.deviceLoaded={};S.balance=0;stopPaymentPoll();S.pay=null;S.sheet=null;go('account');renderSheet();if(S.screen==='account')rr()}}
@@ -575,9 +580,10 @@ function report(error){const raw=String(error?.message||error);toast(friendlyErr
 const accountName=()=>S.me?.email||S.me?.first_name||S.me?.username||"Your account";
 function engineBoot(data){
   S.has_sub=data.has_sub;S.closeToTray=data.close_to_tray!==false;S.mode=data.mode||"tun";S.node=data.node||"";S.hwid=data.hwid||"";S.hwidAvailable=data.hwid_available!==false;S.engine_sub_id=data.sub_id??null;S.version=data.version||"";S.profile=data.profile||{};
+  if(!S.has_sub){NODES.splice(0);S.node=""}
   if(data.sub_id)S.activeSub=data.sub_id;
   S.rules=(data.rules||[]).map(r=>({...r}));savedRules=S.rules.map(r=>({...r}));uid=Math.max(uid,...S.rules.map(r=>r.id));
-  setConn(data.connected?"connected":"idle");
+  if(!S.busy||S.conn!=="connecting")setConn(data.connected?"connected":"idle");
 }
 function applyMe(me){
   if(S.me?.id!==me.id){S.transactions=null;S.historyError="";S.historyLoading=false;historyGeneration++}
@@ -651,10 +657,19 @@ async function loadNodes(){
   if(!S.has_sub)return;
   applyNodes(await invoke("proxies"));
 }
+let subscriptionPromise=null;
+async function ensureSubscription(){
+  if(!S.signed_in||!S.me)return false;
+  if(sub()?.status!=="active")S.activeSub=S.subs.find(s=>s.status==="active")?.id??null;
+  if(!S.activeSub)return false;
+  if(S.has_sub&&S.engine_sub_id===S.activeSub)return true;
+  if(!subscriptionPromise)subscriptionPromise=useSubscription(S.activeSub).finally(()=>subscriptionPromise=null);
+  await subscriptionPromise;
+  return S.has_sub&&S.engine_sub_id===S.activeSub;
+}
 function applyNodes(result){
   S.node=result.now||S.node;
-  const previous=new Map(NODES.map(n=>[n.id,n]));
-  NODES.splice(0,NODES.length,...result.nodes.map(n=>{const old=previous.get(n.name),unknown=n.status==="unknown";return{id:n.name,name:nodeLabel(n.name),sub:n.now?"Using "+nodeLabel(n.now):"From your subscription",status:unknown&&old?old.status:n.status|| (n.delay>0?"ok":"unknown"),ms:n.delay>0?n.delay:unknown&&old?old.ms:null}}));
+  NODES.splice(0,NODES.length,...result.nodes.map(n=>{return{id:n.name,name:nodeLabel(n.name),sub:n.now?"Using "+nodeLabel(n.now):"From your subscription",status:n.status|| (n.delay>0?"ok":"unknown"),ms:n.delay>0?n.delay:null,url:n.url}}));
   if(S.sheet==="nodes")renderSheet();
   if(S.screen==="home"){renderSide();renderStatus()}
 }
@@ -797,9 +812,9 @@ Object.assign(act,{
   signin:()=>go("account"),"account-refresh":()=>refreshScreen(S.screen),cabinet:()=>invoke("open_external",{url:S.cabinet.cabinet_url}),
   logout:async()=>{if(S.conn==="connected"){await invoke("disconnect");setConn("idle")}await invoke("cabinet_logout");engineBoot(await invoke("boot"));stopPaymentPoll();S.pay=null;S.sheet=null;S.signed_in=false;S.me=null;S.subs=[];S.devices={};S.deviceLoaded={};S.balance=0;S.referral=null;S.activeSub=null;go("account");renderSheet();rr()},
   mode:async el=>{if(S.mode===el.dataset.v)return;if(S.conn!=="idle"||S.busy)throw Error("Disconnect before changing mode.");await invoke("set_mode",{mode:el.dataset.v});S.mode=el.dataset.v;S.screen==="home"?renderSide():rr();renderBar()},
-  nodes:async()=>{if(!S.has_sub){toast("Choose a subscription to load its servers.");return}await loadNodes();S.sheet="nodes";renderSheet()},
+  nodes:async()=>{if(!await ensureSubscription()){go("subs");return}await loadNodes();S.sheet="nodes";renderSheet()},
   node:async el=>{await invoke("select_node",{name:el.dataset.v});S.node=el.dataset.v;S.just="n"+S.node;renderSheet();setTimeout(()=>{closeSheet();S.screen==="home"?(renderSide(),renderStatus()):rr();renderBar()},reduced()?0:320)},
-  test:async()=>{if(S.testing||S.refreshing)return;S.testing=true;renderSheet();try{applyNodes(await invoke("test_latency"))}finally{S.testing=false;if(S.sheet==="nodes")renderSheet()}},
+  test:async()=>{if(S.testing||S.refreshing)return;S.testing=true;renderSheet();try{if(!await ensureSubscription()){go("subs");return}applyNodes(await invoke("test_latency"))}catch(error){if(!/cancelled/i.test(String(error)))throw error}finally{S.testing=false;if(S.sheet==="nodes")renderSheet()}},
   pause:async()=>{S.paused=!S.paused;await watchTraffic();rr()},
   "switch-ok":el=>useSubscription(+el.dataset.id),
   "pay-buy":()=>openPay("buy"),"pay-renew":el=>openPay("renew",+el.dataset.id||undefined),"pay-slot":()=>openPay("slot"),"pay-traffic":el=>openPay("traffic",+el.dataset.id),"pay-topup":()=>openPay("topup"),
@@ -836,7 +851,7 @@ document.addEventListener('submit',async event=>{
   if(form.id==='login'){result={me:await invoke('cabinet_login',{email,password})}}
   else{let body={email};if(form.id==='register')body={email,password,accept_terms:$('#terms').checked,accept_personal_data:$('#personal-data').checked};if(form.id==='verify')body={email:S.auth.email,code:$('#code').value.trim()};if(form.id==='reset'){let token=$('#reset-link').value.trim();if(/^https?:\/\//i.test(token)){const link=new URL(token);if(link.origin!==new URL(S.cabinet.cabinet_url).origin)throw Error('invalid reset link');token=link.searchParams.get('token')||''}body={token,password}}result=await invoke('cabinet_auth',{action:form.id,body})}
   S.auth.email=email;
-  if(result.me){applyMe(result.me);S.auth.mode='login';engineBoot(await invoke('boot'));go('home');paintScreen('home')}
+  if(result.me){engineBoot(await invoke('boot'));applyMe(result.me);S.auth.mode='login';go('home');paintScreen('home');if(await ensureSubscription())await loadNodes()}
   else if(form.id==='register'){S.auth.mode='verify';S.auth.email=result.email||email;toast('Check your email for a verification code.');rr()}
   else if(form.id==='forgot'){S.auth.mode='reset';rr()}
  }catch(error){report(error)}finally{S.authBusy=false;if(button.isConnected){button.disabled=false;button.classList.remove('loading')}const current=$('form.auth button[type="submit"]');if(current)current.disabled=false}
@@ -855,8 +870,8 @@ async function boot(){
   await window.__TAURI__.event.listen("tray-toggle",()=>{toggle().catch(report)});
   await window.__TAURI__.event.listen("dropped",()=>{S.conns=[];connEls.clear();S.secs=0;setConn("idle");if(["home","conns"].includes(S.screen))rr();toast("Disconnected. The VPN core stopped.")});
   const core=await invoke("boot");engineBoot(core);paintScreen(S.screen);
-  try{S.cabinet=await invoke("cabinet_boot");S.signed_in=S.cabinet.signed_in;if(S.cabinet.me)applyMe(S.cabinet.me);if(S.cabinet.error)report(S.cabinet.error);paintScreen(S.screen)}catch(error){report(error)}
-  if(S.has_sub)await loadNodes();if(core.connect_on_boot&&S.signed_in&&S.me&&S.has_sub&&S.conn!=="connected")await toggle();
+  try{S.cabinet=await invoke("cabinet_boot");S.signed_in=S.cabinet.signed_in;if(S.cabinet.me)applyMe(S.cabinet.me);if(S.cabinet.error)report(S.cabinet.error)}catch(error){report(error)}finally{S.restoring=false;paintScreen(S.screen)}
+  if(S.signed_in&&await ensureSubscription())await loadNodes();
   document.fonts?.ready.then(markNav);setTimeout(markNav,300);
 }
 const trafficIds=new Map();

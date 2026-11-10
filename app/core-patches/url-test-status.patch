@@ -1,0 +1,52 @@
+--- a/adapter/adapter.go
++++ b/adapter/adapter.go
+@@ -274,6 +274,9 @@
+ 	}
+ 
+ 	satisfied = resp != nil && (expectedStatus == nil || expectedStatus.Check(uint16(resp.StatusCode)))
++	if !satisfied {
++		return 0, fmt.Errorf("URL test did not return the expected HTTP status")
++	}
+ 	t = uint16(time.Since(start) / time.Millisecond)
+ 	if t == 0 {
+ 		// a zero delay means a failed test to callers, so report a test
+--- /dev/null
++++ b/adapter/urltest_status_akimov_test.go
+@@ -0,0 +1,37 @@
++package adapter
++
++import (
++	"context"
++	"net/http"
++	"net/http/httptest"
++	"strconv"
++	"testing"
++	"time"
++
++	"github.com/metacubex/mihomo/adapter/outbound"
++	"github.com/metacubex/mihomo/common/utils"
++)
++
++func TestURLTestRequiresExpectedStatus(t *testing.T) {
++	expected, err := utils.NewUnsignedRanges[uint16]("204")
++	if err != nil {
++		t.Fatal(err)
++	}
++	for _, status := range []int{204, 200, 403, 302} {
++		t.Run(strconv.Itoa(status), func(t *testing.T) {
++			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(status) }))
++			defer server.Close()
++			proxy := NewProxy(outbound.NewDirect())
++			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
++			defer cancel()
++			delay, err := proxy.URLTest(ctx, server.URL, expected)
++			if status == 204 {
++				if err != nil || delay == 0 {
++					t.Fatalf("HTTP 204 must pass: delay=%d error=%v", delay, err)
++				}
++			} else if err == nil || delay != 0 {
++				t.Fatalf("HTTP %d must fail: delay=%d error=%v", status, delay, err)
++			}
++		})
++	}
++}
