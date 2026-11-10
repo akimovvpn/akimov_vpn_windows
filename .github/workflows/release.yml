@@ -1,0 +1,89 @@
+name: Windows release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.26.10'
+          cache: false
+      - name: Check release version
+        run: |
+          $version = (Get-Content app/src-tauri/tauri.conf.json | ConvertFrom-Json).version
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$version") { throw 'Tag and app version differ.' }
+          "APP_VERSION=$version" >> $env:GITHUB_ENV
+      - name: Set up Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup component add clippy rustfmt
+      - name: Build patched core from verified upstream source
+        run: ./app/build-core.ps1
+      - name: Check app and UI
+        run: |
+          cargo fmt --manifest-path app/src-tauri/Cargo.toml -- --check
+          if ($LASTEXITCODE -ne 0) { throw 'Formatting check failed.' }
+          cargo test --locked --manifest-path app/src-tauri/Cargo.toml -- --skip windows_core_lifecycle --skip windows_tun_smoke
+          if ($LASTEXITCODE -ne 0) { throw 'Rust tests failed.' }
+          cargo clippy --locked --manifest-path app/src-tauri/Cargo.toml --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw 'Rust lint failed.' }
+          node app/tests/ui.test.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'UI tests failed.' }
+          node app/tests/ui-render.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Rendered UI checks failed.' }
+      - name: Check modern Xray compatibility without system routing changes
+        run: |
+          ./app/tests/prepare-interop.ps1
+          node app/tests/core-interop.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Xray interoperability failed.' }
+      - name: Build Windows setup installer
+        working-directory: app
+        run: |
+          npx --yes @tauri-apps/cli@2.12.4 build --ci --bundles nsis -- --locked
+          if ($LASTEXITCODE -ne 0) { throw 'Installer build failed.' }
+      - name: Package portable app, source and checksums
+        run: |
+          ./app/build.ps1 -SkipBuild
+          $release = New-Item -ItemType Directory -Force release
+          $setup = @(Get-ChildItem app/src-tauri/target/release/bundle/nsis/*-setup.exe)
+          if ($setup.Count -ne 1) { throw 'Expected exactly one installer.' }
+          Copy-Item -LiteralPath $setup[0].FullName -Destination "release/akimov-vpn-$env:APP_VERSION-windows-x64-setup.exe"
+          Compress-Archive -Path "app/dist/akimov-vpn-desktop-$env:APP_VERSION/*" -DestinationPath "release/akimov-vpn-$env:APP_VERSION-windows-x64-portable.zip"
+          Copy-Item -LiteralPath .tools/mihomo-v1.19.33.zip -Destination release/mihomo-v1.19.33-upstream-source.zip
+          Get-ChildItem release -File | Sort-Object Name | ForEach-Object { "{0}  {1}" -f (Get-FileHash -LiteralPath $_.FullName).Hash.ToLowerInvariant(), $_.Name } | Set-Content -Encoding ascii release/SHA256SUMS.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-${{ env.APP_VERSION }}
+          path: release/*
+          if-no-files-found: error
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3
+        with:
+          name: akimov vpn ${{ env.APP_VERSION }}
+          body_path: RELEASE_NOTES.md
+          files: release/*
+          fail_on_unmatched_files: true

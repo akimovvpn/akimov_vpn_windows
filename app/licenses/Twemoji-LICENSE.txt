@@ -1,0 +1,2 @@
+Twemoji flag artwork, Copyright Twitter, Inc. and other contributors. Licensed under Creative Commons Attribution 4.0 International. https://creativecommons.org/licenses/by/4.0/
+Source: https://github.com/jdecked/twemoji/tree/main/assets/svg

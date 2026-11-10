@@ -1,0 +1,30 @@
+@font-face {
+  font-family: 'Geologica';
+  font-style: normal;
+  font-weight: 300;
+  font-display: swap;
+  src: url(fonts/geologica-0.ttf) format('truetype');
+}
+@font-face {
+  font-family: 'Geologica';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url(fonts/geologica-1.ttf) format('truetype');
+}
+@font-face {
+  font-family: 'Geologica';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url(fonts/geologica-2.ttf) format('truetype');
+}
+@font-face {
+  font-family: 'Geologica';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url(fonts/geologica-3.ttf) format('truetype');
+}
+@font-face{font-family:'Martian Mono';font-style:normal;font-weight:400;font-display:swap;src:url(fonts/martian-mono-400.ttf) format('truetype')}
+@font-face{font-family:'Martian Mono';font-style:normal;font-weight:500;font-display:swap;src:url(fonts/martian-mono-500.ttf) format('truetype')}

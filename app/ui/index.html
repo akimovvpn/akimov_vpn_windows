@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en" data-d="1" data-theme="dark" data-view="desktop">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>акимов vpn</title><link rel="stylesheet" href="fonts.css"><link rel="stylesheet" href="style.css"><script src="app.js" defer></script></head>
+<body>
+<div class="stage">
+  <div class="window" id="win" data-conn="idle">
+    <div class="bg"><i></i><i></i><i></i></div>
+    <header class="bar"><button class="logo" id="logo" data-act="go" data-v="home" aria-label="Home"></button><span class="word" id="word"></span><span class="sp"></span>
+      <button class="tbtn" id="themebtn" data-act="theme" aria-label="Switch theme"><svg class="ic s" viewBox="0 0 20 20"><circle cx="10" cy="10" r="6.5"/><path d="M10 3.5a6.5 6.5 0 0 1 0 13z" fill="currentColor"/></svg></button>
+      <button class="tbtn" id="accbtn" data-act="hub" aria-label="Account and settings" aria-pressed="false"><svg class="ic" viewBox="0 0 20 20"><circle cx="10" cy="7.4" r="3.1"/><path d="M4.2 16.6c.9-3 3.2-4.4 5.8-4.4s4.9 1.4 5.8 4.4"/></svg></button>
+    </header>
+    <div class="body"><nav class="rail" id="rail" aria-label="Main"></nav><main class="main" id="main" tabindex="-1"></main></div>
+    <footer class="sbar" id="sbar"></footer>
+    <svg width="0" height="0" style="position:absolute" aria-hidden="true"><filter id="lg" x="0" y="0" width="100%" height="100%" color-interpolation-filters="sRGB"><feImage id="lgmap" x="0" y="0" width="68" height="52" preserveAspectRatio="none" result="map"/><feDisplacementMap in="SourceGraphic" in2="map" scale="20" xChannelSelector="R" yChannelSelector="G"/></filter></svg>
+    <div id="sheet"></div>
+    <div class="toasts" id="toasts" aria-live="polite"></div>
+  </div>
+</div>
+</body>
+</html>

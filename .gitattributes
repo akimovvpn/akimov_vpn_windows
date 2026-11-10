@@ -1,0 +1,10 @@
+* text=auto eol=lf
+*.exe binary
+*.dll binary
+*.ico binary
+*.woff2 binary
+*.ttf binary
+*.png binary
+*.patch -whitespace
+app/licenses/** -whitespace
+app/ui/fonts/*-OFL.txt -whitespace

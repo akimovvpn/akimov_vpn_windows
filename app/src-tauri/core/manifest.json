@@ -1,0 +1,8 @@
+{
+  "version": "v1.19.33-akimov.1",
+  "upstream": "https://github.com/MetaCubeX/mihomo/tree/v1.19.33",
+  "source_archive_sha256": "bb705aa873fc0e9db352fdc69b992c93fad5b310756e0e5f81194a0e0c108e21",
+  "patch_sha256": "ee341e3705afa7e8b75b54482f5a3886956780b65489d85d679bcf5c398d0875",
+  "binary_sha256": "433b86ed2bc8f3489d7a66c5bbc0dff3517d8db74ec606e687968593f3145977",
+  "toolchain": "go version go1.26.10 windows/amd64"
+}

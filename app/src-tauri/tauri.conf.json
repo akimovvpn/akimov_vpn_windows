@@ -1,0 +1,47 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "akimov vpn",
+  "version": "1.0.0",
+  "identifier": "vpn.akimov.app",
+  "build": {
+    "frontendDist": "../ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "акимов vpn",
+        "width": 1060,
+        "height": 700,
+        "minWidth": 900,
+        "minHeight": 640,
+        "center": true,
+        "theme": "Dark",
+        "backgroundColor": "#07070A"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/icon.ico"],
+    "resources": {
+      "core/mihomo-windows-amd64-compatible.exe": "core/mihomo.exe",
+      "core/wintun.dll": "core/wintun.dll",
+      "core/manifest.json": "core/manifest.json",
+      "../licenses/": "licenses/",
+      "../ui/fonts/Martian-Mono-OFL.txt": "licenses/Martian-Mono-OFL.txt",
+      "../core-patches/": "core-patches/",
+      "../build-core.ps1": "build-core.ps1",
+      "../README.md": "README.md"
+    },
+    "windows": {
+      "webviewInstallMode": {"type": "downloadBootstrapper", "silent": true},
+      "nsis": {"installMode": "currentUser", "installerIcon": "icons/icon.ico"}
+    }
+  }
+}
