@@ -127,6 +127,13 @@ impl Cabinet {
             .map_err(|_| "Cabinet session is unavailable. Restart the app.".into())
     }
 
+    pub fn require_session(&self) -> Result<(), String> {
+        if self.lock()?.refresh.is_empty() {
+            return Err("Please sign in again.".into());
+        }
+        Ok(())
+    }
+
     pub fn boot(&self) -> Result<Value, String> {
         let mut state = self.lock()?;
         let mut me = None;
@@ -865,6 +872,7 @@ mod tests {
                 .as_nanos()
         ));
         let cabinet = Cabinet::new(dir.clone());
+        assert!(cabinet.require_session().is_err());
         cabinet
             .set_tokens(
                 &mut cabinet.lock().unwrap(),
@@ -879,6 +887,7 @@ mod tests {
         assert!(!saved.contains("private-access-value"));
         assert!(!saved.contains("private-refresh-value"));
         let restored = Cabinet::new(dir.clone());
+        assert!(restored.require_session().is_ok());
         assert_eq!(restored.lock().unwrap().refresh, "private-refresh-value");
         assert!(restored.lock().unwrap().access.is_empty());
         restored.logout().unwrap();

@@ -139,8 +139,9 @@ fn refresh_subscription(e: Eng, gate: Gate) -> Result<Value, String> {
     e.refresh_subscription()
 }
 #[tauri::command(async)]
-fn connect(e: Eng, gate: Gate, app: tauri::AppHandle) -> Result<Value, String> {
+fn connect(e: Eng, c: Cab, gate: Gate, app: tauri::AppHandle) -> Result<Value, String> {
     let _guard = gate.0.lock().map_err(|_| "Account operation failed.")?;
+    c.require_session()?;
     let result = e.inner().connect(app.clone());
     tray_sync(&app);
     result
@@ -347,6 +348,29 @@ fn main() {
             watch
         ])
         .setup(|app| {
+            use windows_sys::Win32::Graphics::Dwm::{
+                DwmSetWindowAttribute, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR,
+                DWMWA_USE_IMMERSIVE_DARK_MODE,
+            };
+            if let Some(window) = app.get_webview_window("main") {
+                let hwnd = window.hwnd()?.0;
+                // COLORREF is BGR: match the fixed Dust background #07070A.
+                for (attribute, value) in [
+                    (DWMWA_USE_IMMERSIVE_DARK_MODE, 1u32),
+                    (DWMWA_CAPTION_COLOR, 0x000A0707),
+                    (DWMWA_TEXT_COLOR, 0x00F0F0F0),
+                ] {
+                    // Older Windows versions keep the configured native dark theme.
+                    unsafe {
+                        DwmSetWindowAttribute(
+                            hwnd as _,
+                            attribute as u32,
+                            std::ptr::from_ref(&value).cast(),
+                            std::mem::size_of_val(&value) as u32,
+                        );
+                    }
+                }
+            }
             build_tray(app)?;
             Ok(())
         })

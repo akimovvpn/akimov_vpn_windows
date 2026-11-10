@@ -175,6 +175,7 @@ async function toggle(){
     if(S.conn==="connecting"){const attempt=++connectAttempt;await invoke("disconnect");if(attempt===connectAttempt){S.busy=false;S.conns=[];connEls.clear();setConn("idle");if(S.screen==="home")renderSide()}}
     return;
   }
+  if(!S.signed_in&&S.conn!=="connected"){go("account");return}
   if(S.conn!=="connected"&&S.signed_in&&sub()?.status==="active"&&S.engine_sub_id!==S.activeSub)await useSubscription(S.activeSub);
   if(S.conn!=="connected"&&!S.has_sub){go(S.signed_in?"subs":"account");return}
   const attempt=++connectAttempt;S.busy=true;const connected=S.conn==="connected";setConn(connected?"connected":"connecting");
@@ -674,7 +675,7 @@ function signInScreen(){
  if(mode==='register')fields+=`<label class="consent"><input type="checkbox" id="terms" required><span>I accept the ${legalLink('offer','public offer')} and ${legalLink('terms','terms of service')}.</span></label><label class="consent"><input type="checkbox" id="personal-data" required><span>I consent to ${legalLink('consent','processing of my personal data')} and have read the ${legalLink('privacy','privacy policy')}.</span></label>`;
  const button={login:'Sign in',register:'Create account',verify:'Verify email',forgot:'Send reset link',reset:'Save password'}[mode];
  const switcher=mode==='login'?'New here? <a class="auth-link accent" href="#" data-act="auth" data-v="register">Create account</a>':mode==='register'?'Already have an account? <a class="auth-link accent" href="#" data-act="auth" data-v="login">Sign in</a>':'<a class="auth-link" href="#" data-act="auth" data-v="login">Back to sign in</a>';
- return `<section class="auth-wrap"><form id="${mode}" class="card pad auth"><h1 class="auth-title">${title}</h1>${fields}<button class="btn primary block" style="margin-top:20px" type="submit" ${S.authBusy?'disabled':''}>${button}</button><div class="auth-switch">${switcher}${mode==='verify'?` · <button class="auth-link" type="button" data-act="auth-resend" ${Date.now()<S.auth.retryAt?'disabled':''}>Resend code</button>`:''}</div></form><p class="auth-legal"><a class="auth-link" href="#" data-act="legal">Legal documents</a></p></section>`;
+ return `<section class="auth-wrap"><form id="${mode}" class="card pad auth"><h1 class="auth-title">${title}</h1>${fields}<button class="btn primary block" style="margin-top:20px" type="submit" ${S.authBusy?'disabled':''}>${button}</button><div class="auth-switch">${switcher}${mode==='verify'?` · <button class="auth-link" type="button" data-act="auth-resend" ${Date.now()<S.auth.retryAt?'disabled':''}>Resend code</button>`:''}</div></form></section>`;
 }
 
 act['subscription-refresh']=async()=>{if(S.refreshing||S.testing||!S.has_sub)return;S.refreshing=true;if(S.sheet==="nodes")renderSheet();if(S.screen==='settings'||S.screen==='subs')rr();try{engineBoot(await invoke('refresh_subscription'));await loadNodes();toast('Subscription updated.')}catch(error){report(error)}finally{S.refreshing=false;if(S.sheet==="nodes")renderSheet();if(S.screen==='settings'||S.screen==='subs')rr()}};
