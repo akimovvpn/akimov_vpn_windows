@@ -321,12 +321,10 @@ const screens={
       </div>`).join(""):`<div class="empty"><p>No devices yet. This computer is added the first time you connect.</p></div>`}</div></div>`},
 
   settings(){
-    const p=S.profile||{};
     return head("Settings")+`<div class="groups stag">
       ${group("Connection",`<div class="set mode-setting"><div class="grow"><div class="set-t">Mode</div><div class="cap dim">Whole device uses a virtual adapter. Browser only sets the system proxy.</div></div>${seg("mode",MODES,S.mode,"mode")}</div>`+`<div class="set"><div class="grow"><div class="set-t">Device identification</div><div class="cap dim">Hardware identification is required and cannot be disabled.</div></div><span class="pill ${S.hwidAvailable===false?"bad":"ok"}">${S.hwidAvailable===false?"Unavailable":"Required"}</span></div>`+navrow("rules","rules","Routing rules",S.rules.filter(r=>r.on).length+" of your own")+navrow("conns","conns","Traffic",S.conn==="connected"?S.conns.length+" open connections":"Where your traffic goes"))}
-      <section class="grp"><h2 class="over">Subscription</h2>${subscriptionInfo()}</section>
       ${group("Application",`<div class="set"><div class="grow"><div class="set-t">Keep running in the tray</div><div class="cap dim">${S.closeToTray?"Closing the window hides it. Quit from the tray menu.":"Closing the window disconnects and quits."}</div></div><button class="sw" role="switch" data-k="closetray" aria-checked="${S.closeToTray}" data-act="close-tray" aria-label="Keep running in the tray"></button></div>`)}
-      ${group("About",inforow("Version",S.version||"")+inforow("Core","mihomo · Windows")+(p.update_hours?inforow("Profile refresh",p.update_hours+(p.update_hours===1?" hour":" hours")):""))}
+      ${group("About",inforow("Version",S.version||"")+inforow("Core","mihomo · Windows"))}
       ${group("Legal",legalRows())}</div>`
   },
   account(){
@@ -596,12 +594,13 @@ async function loadLegal(force=false){
     if(!Array.isArray(result.docs)||result.docs.length>32)throw Error("invalid documents");
     const docs=result.docs.map(doc=>{const url=new URL(doc.url);if(url.protocol!=="https:"||url.username||url.password||typeof doc.title!=="string"||doc.title.length>300)throw Error("invalid document");return{key:String(doc.key||""),title:doc.title,url:url.href}});
     S.legal={docs,version:String(result.version||"").slice(0,128)};
+    for(const link of $$('[data-act="legal-link"]')){const doc=docs.find(d=>d.key===link.dataset.key);if(doc)link.setAttribute("href",doc.url)}
   }catch(error){S.legalError=friendlyError(error)}finally{S.legalLoading=false;if(S.sheet==="legal")renderSheet();paintScreen("settings")}
 }
 function legalRows(){
   if(S.legalError)return `<div class="pad col"><p class="cap">${esc(S.legalError)}</p><button class="btn" data-act="legal-retry">Try again</button></div>`;
   if(!S.legal)return '<div class="pad cap dim">Loading documents…</div>';
-  return S.legal.docs.map((doc,i)=>`<button class="set navrow" data-act="legal-doc" data-i="${i}">${ic("info")}<span class="grow set-t">${esc(doc.title)}</span>${ic("ext","s")}</button>`).join("")+`<div class="pad cap dim">Version ${esc(S.legal.version)}</div>`;
+  return S.legal.docs.map((doc,i)=>`<a class="set navrow legal-doc" href="${esc(doc.url)}" data-act="legal-doc" data-i="${i}">${ic("info")}<span class="grow set-t">${esc(doc.title)}</span>${ic("ext","s")}</a>`).join("")+`<div class="pad cap dim">Version ${esc(S.legal.version)}</div>`;
 }
 async function loadHistory(){
   if(!S.signed_in||!S.me||S.historyLoading)return;
@@ -668,19 +667,16 @@ async function useSubscription(id){
 async function watchTraffic(){await invoke("watch",{on:S.screen==="conns"&&S.conn==="connected"&&!S.paused&&!document.hidden})}
 function legalLink(key,label){const doc=S.legal?.docs.find(d=>d.key===key);return `<a class="legal-link" href="${esc(doc?.url||'#')}" data-act="legal-link" data-key="${key}">${label}</a>`}
 function signInScreen(){
- const mode=S.auth.mode,email=`<label for="email">Email</label><input class="input" id="email" type="email" autocomplete="email" value="${esc(S.auth.email)}" required>`,password=`<label for="password">${mode==='reset'?'New password':'Password'}</label><input class="input" id="password" type="password" minlength="8" maxlength="128" autocomplete="${mode==='login'?'current-password':'new-password'}" required>`;
+ const mode=S.auth.mode,email=`<label for="email">Email</label><input class="input" id="email" type="email" autocomplete="email" value="${esc(S.auth.email)}" required>`;
+ const password=`${mode==='login'?'<div class="auth-label-row"><label for="password">Password</label><a class="auth-link" href="#" data-act="auth" data-v="forgot">Forgot password?</a></div>':`<label for="password">${mode==='reset'?'New password':'Password'}</label>`}<input class="input" id="password" type="password" minlength="8" maxlength="128" autocomplete="${mode==='login'?'current-password':'new-password'}" required>`;
  const title={login:'Sign in',register:'Create account',verify:'Check your email',forgot:'Reset password',reset:'Set a new password'}[mode];
- let fields=mode==='verify'?`<p class="cap">Enter the six-digit code sent to ${esc(S.auth.email)}.</p><label for="code">Email code</label><input class="input mono" id="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required>`:mode==='reset'?`<p class="cap">If this email belongs to an account, we sent a reset link. Copy that link from your email and paste it here; you do not need to open the website.</p><label for="reset-link">Reset link or token</label><input class="input" id="reset-link" type="text" autocomplete="off" spellcheck="false" required>${password}`:email+(mode==='forgot'?'':password);
+ let fields=mode==='verify'?`<p class="cap">Enter the six-digit code sent to ${esc(S.auth.email)}.</p><label for="code">Email code</label><input class="input mono" id="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required>`:mode==='reset'?`<p class="cap">Copy the reset link from your email and paste it here to set your new password.</p><label for="reset-link">Reset link or token</label><input class="input" id="reset-link" type="text" autocomplete="off" spellcheck="false" required>${password}`:email+(mode==='forgot'?'':password);
  if(mode==='register')fields+=`<label class="consent"><input type="checkbox" id="terms" required><span>I accept the ${legalLink('offer','public offer')} and ${legalLink('terms','terms of service')}.</span></label><label class="consent"><input type="checkbox" id="personal-data" required><span>I consent to ${legalLink('consent','processing of my personal data')} and have read the ${legalLink('privacy','privacy policy')}.</span></label>`;
  const button={login:'Sign in',register:'Create account',verify:'Verify email',forgot:'Send reset link',reset:'Save password'}[mode];
- return `<form id="${mode}" class="card pad auth"><h1 class="h">${title}</h1>${fields}<button class="btn primary block" style="margin-top:20px" type="submit" ${S.authBusy?'disabled':''}>${button}</button>${mode==='login'?'<button class="btn quiet block" type="button" data-act="auth" data-v="register">Create account</button><button class="btn quiet block" type="button" data-act="auth" data-v="forgot">Forgot password?</button>':'<button class="btn quiet block" type="button" data-act="auth" data-v="login">Back to sign in</button>'}${mode==='verify'?`<button class="btn quiet block" type="button" data-act="auth-resend" ${Date.now()<S.auth.retryAt?'disabled':''}>Resend code</button>`:''}<button class="btn quiet block" type="button" data-act="legal">Legal documents</button></form>`;
+ const switcher=mode==='login'?'New here? <a class="auth-link accent" href="#" data-act="auth" data-v="register">Create account</a>':mode==='register'?'Already have an account? <a class="auth-link accent" href="#" data-act="auth" data-v="login">Sign in</a>':'<a class="auth-link" href="#" data-act="auth" data-v="login">Back to sign in</a>';
+ return `<section class="auth-wrap"><form id="${mode}" class="card pad auth"><h1 class="auth-title">${title}</h1>${fields}<button class="btn primary block" style="margin-top:20px" type="submit" ${S.authBusy?'disabled':''}>${button}</button><div class="auth-switch">${switcher}${mode==='verify'?` · <button class="auth-link" type="button" data-act="auth-resend" ${Date.now()<S.auth.retryAt?'disabled':''}>Resend code</button>`:''}</div></form><p class="auth-legal"><a class="auth-link" href="#" data-act="legal">Legal documents</a></p></section>`;
 }
 
-function subscriptionInfo(){
- const p=S.profile||{},used=(p.upload||0)+(p.download||0),gb=bytes=>(bytes/1073741824).toLocaleString('en',{maximumFractionDigits:2})+' GB';
- const date=seconds=>{const value=new Date(seconds*1000);return Number.isFinite(value.getTime())?value.toLocaleString():'—'};
- return `<section class="card pad col"><div class="row"><h2 class="h grow">${esc(p.title||'Subscription')}</h2><button class="btn" data-act="subscription-refresh" ${!S.has_sub||S.refreshing?'disabled':''}>${S.refreshing?'Updating…':'Update subscription'}</button></div>${p.updated_at?`<div class="cap dim">Updated ${date(p.updated_at)}</div>`:''}${p.total!=null?`<div class="cap">${gb(used)} used · ${p.total>0?gb(p.total)+' total':'Unlimited traffic'}</div>`:''}${p.expires!=null?`<div class="cap">${p.expires>0?'Expires '+date(p.expires):'No expiry date'}</div>`:''}${p.update_hours?`<div class="cap dim">Profile refresh interval: ${p.update_hours} ${p.update_hours===1?'hour':'hours'}</div>`:''}<div class="row">${p.support_url?'<button class="btn quiet" data-act="profile-link" data-v="support_url">Support</button>':''}${p.web_page_url?'<button class="btn quiet" data-act="profile-link" data-v="web_page_url">Subscription details</button>':''}</div></section>`;
-}
 act['subscription-refresh']=async()=>{if(S.refreshing||S.testing||!S.has_sub)return;S.refreshing=true;if(S.sheet==="nodes")renderSheet();if(S.screen==='settings'||S.screen==='subs')rr();try{engineBoot(await invoke('refresh_subscription'));await loadNodes();toast('Subscription updated.')}catch(error){report(error)}finally{S.refreshing=false;if(S.sheet==="nodes")renderSheet();if(S.screen==='settings'||S.screen==='subs')rr()}};
 act['close-tray']=async()=>{const on=!S.closeToTray;await invoke('set_close_to_tray',{on});S.closeToTray=on;rr()};
 act['profile-link']=el=>{const url=S.profile?.[el.dataset.v];if(url)return invoke('open_external',{url})};
