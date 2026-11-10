@@ -635,7 +635,7 @@ async function loadTariffs(){
   const result=await api("GET","/tariffs");
   TARIFFS.splice(0,TARIFFS.length,...result.tariffs.map(t=>({...t,price:t.price_kopecks,gb:t.traffic_gb})));
 }
-function paintScreen(screen){if(S.screen!==screen||S.edit)return;const m=$("#main");if(m.classList.contains("enter")){pendingPaint=screen;return}if(!m.classList.contains("leave"))render()}
+function paintScreen(screen){if(S.screen!==screen||S.edit||!S.signed_in&&$("#main form.auth"))return;const m=$("#main");if(m.classList.contains("enter")){pendingPaint=screen;return}if(!m.classList.contains("leave"))render()}
 async function refreshScreen(screen){
   if(screen==="settings")await loadLegal();
   if(!S.signed_in)return;
@@ -820,7 +820,7 @@ Object.assign(act,{
   }
 });
 let resendTimer=0;
-act.auth=el=>{if(S.authBusy)return;const input=$('#email');if(input)S.auth.email=input.value.trim();S.auth.mode=el.dataset.v;rr()};
+act.auth=el=>{if(S.authBusy)return;clearTimeout(navT);pendingPaint=null;const input=$('#email');if(input)S.auth.email=input.value.trim();S.auth.mode=el.dataset.v;rr()};
 act['auth-resend']=async()=>{if(S.authBusy||Date.now()<S.auth.retryAt)return;S.authBusy=true;try{await invoke('cabinet_auth',{action:'resend',body:{email:S.auth.email}});S.auth.retryAt=Date.now()+60000;toast('A new code has been sent.');clearTimeout(resendTimer);resendTimer=setTimeout(()=>{if(!S.signed_in&&S.auth.mode==='verify')rr()},60000)}catch(error){report(error)}finally{S.authBusy=false;rr()}};
 document.addEventListener('submit',async event=>{
  const form=event.target;if(!['login','register','verify','forgot','reset','promo'].includes(form.id))return;event.preventDefault();if(S.authBusy)return;
