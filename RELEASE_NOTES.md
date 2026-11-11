@@ -1,15 +1,11 @@
-akimov vpn 1.0.1 for Windows 10/11 x64.
+akimov vpn 1.0.2 for Windows 10/11 x64.
 
-- Whole-device mode elevates a headless core owner; the app window stays open in place.
-- Saved sessions restore on a neutral loading screen without flashing the sign-in form.
-- Existing active plans load their connection profile automatically before connecting, opening servers, or testing latency.
-- Offline latency testing fixes Windows geodata paths, reuses downloaded routing databases, and resolves server addresses using core DNS.
-- Real HTTPS URL tests verify HTTP 204, retry a second endpoint, and show current measured delays instead of unrelated background timeouts.
-- The connected status keeps the timer and traffic rates without the redundant server subtitle.
-- Connection status now verifies the selected route, and whole-device mode checks actual system routing.
-- Repeated failures share one message; account-service failures no longer claim that the entire Internet is offline.
-- Disconnect and connection cancellation remain available during other work.
+- An account that has not loaded yet is no longer shown as an empty account or as an error. Account, Plans and Devices show loading placeholders until the first successful answer, keep the last loaded data afterwards, and retry quietly in the background.
+- A saved connection profile can connect while the account service is unreachable. Account data refreshes as soon as the VPN is up.
+- Account requests fall back to the VPN route when the direct route is refused before reaching the account service. This fixes account screens in Browser only mode on networks where the API address is not reachable directly.
+- Settings uses two columns that fill independently, so short groups no longer leave empty space.
+- In-app updates: the app checks for a newer signed release shortly after start and from Settings → About. Installing verifies the release signature, disconnects the VPN, runs the installer and restarts the app.
 
-Choose setup.exe to install, or extract the portable ZIP with its core folder. The installer is unsigned. Your other VPN is not disabled by this update.
+Choose setup.exe to install, or extract the portable ZIP with its core folder. In-app updates need the installed version. The installer is not code-signed for Windows SmartScreen; update packages are signed and verified by the app. Your other VPN is not disabled by this update.
 
 Bundled core/driver/asset licenses and the core patch are included. The matching upstream core source is included with the release.

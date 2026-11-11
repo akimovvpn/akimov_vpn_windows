@@ -45,8 +45,37 @@ struct State {
 pub struct Cabinet {
     dir: PathBuf,
     agent: Result<ureq::Agent, String>,
+    // Local port of the running VPN core, 0 when it is not running. Used only as a fallback route.
+    proxy: std::sync::atomic::AtomicU16,
     // Holding this lock through HTTP also serializes refresh and account changes.
     state: Mutex<State>,
+}
+
+// Internal markers for "the request never reached the cabinet", which makes a second route safe for any method.
+const EDGE_BLOCKED: &str = "edge_blocked";
+const UNSENT: &str = "unsent";
+const UNREACHABLE: &str = "Cabinet connection failed. Check your internet and API address.";
+
+/// The edge in front of the API rejects some networks before the cabinet sees the request.
+/// Its answer names the caller's address; the cabinet's own 403 ("Banned") does not.
+fn edge_blocked(status: u16, value: &Value) -> bool {
+    status == 403 && value["error"] == "forbidden" && value["ip"].is_string()
+}
+
+fn build_agent(proxy_port: u16) -> Result<ureq::Agent, String> {
+    let tls = native_tls::TlsConnector::new().map_err(|_| "Windows TLS is unavailable.")?;
+    let mut builder = ureq::AgentBuilder::new()
+        .tls_connector(Arc::new(tls))
+        .redirects(0) // Never forward credentials to a redirect destination.
+        .max_idle_connections(0) // Avoid ureq's automatic retries of stale pooled connections.
+        .timeout_connect(Duration::from_secs(10))
+        .timeout(Duration::from_secs(25));
+    if proxy_port != 0 {
+        let proxy = ureq::Proxy::new(format!("http://127.0.0.1:{proxy_port}"))
+            .map_err(|_| "The VPN route is unavailable.")?;
+        builder = builder.proxy(proxy);
+    }
+    Ok(builder.build())
 }
 
 impl Cabinet {
@@ -98,20 +127,11 @@ impl Cabinet {
             Ok((saved, refresh)) => (saved, refresh, None),
             Err(error) => (Saved::default(), String::new(), Some(error)),
         };
-        let agent = native_tls::TlsConnector::new()
-            .map(|tls| {
-                ureq::AgentBuilder::new()
-                    .tls_connector(Arc::new(tls))
-                    .redirects(0) // Never forward credentials to a redirect destination.
-                    .max_idle_connections(0) // Avoid ureq's automatic retries of stale pooled connections.
-                    .timeout_connect(Duration::from_secs(10))
-                    .timeout(Duration::from_secs(25))
-                    .build()
-            })
-            .map_err(|_| "Windows TLS is unavailable.".to_owned());
+        let agent = build_agent(0);
         Self {
             dir,
             agent,
+            proxy: std::sync::atomic::AtomicU16::new(0),
             state: Mutex::new(State {
                 saved,
                 access: String::new(),
@@ -389,8 +409,42 @@ impl Cabinet {
         write.map_err(|_| "Could not save cabinet preferences securely.".into())
     }
 
+    /// Tell the cabinet client where the running VPN core listens (0 when it is not running).
+    pub fn set_proxy(&self, port: u16) {
+        self.proxy.store(port, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Direct first. If the request provably never reached the cabinet and the VPN is up, go through the VPN once.
     fn http(
         &self,
+        base: &str,
+        method: &str,
+        path: &str,
+        token: Option<&str>,
+        body: Option<&Value>,
+    ) -> Result<Value, HttpError> {
+        let agent = self.agent.as_ref().map_err(|e| HttpError::local(e))?;
+        let direct = self.http_via(agent, base, method, path, token, body);
+        let port = self.proxy.load(std::sync::atomic::Ordering::Relaxed);
+        let result = match direct {
+            Err(e) if port != 0 && (e.message == EDGE_BLOCKED || e.message == UNSENT) => {
+                let via_vpn = build_agent(port).map_err(|e| HttpError::local(&e))?;
+                self.http_via(&via_vpn, base, method, path, token, body)
+            }
+            other => other,
+        };
+        result.map_err(|e| {
+            if e.message == EDGE_BLOCKED || e.message == UNSENT {
+                HttpError::local(UNREACHABLE)
+            } else {
+                e
+            }
+        })
+    }
+
+    fn http_via(
+        &self,
+        agent: &ureq::Agent,
         base: &str,
         method: &str,
         path: &str,
@@ -400,7 +454,6 @@ impl Cabinet {
         if base.is_empty() {
             return Err(HttpError::local("Set your cabinet API address first."));
         }
-        let agent = self.agent.as_ref().map_err(|e| HttpError::local(e))?;
         let tunnel = matches!(method, "PATCH" | "DELETE");
         let mut request = agent
             .request(
@@ -427,10 +480,13 @@ impl Cabinet {
             }
             Err(ureq::Error::Status(status, response)) => (response, status),
             // Transport diagnostics may include a URL; keep tokens/links out of errors.
-            Err(ureq::Error::Transport(_)) => {
-                return Err(HttpError::local(
-                    "Cabinet connection failed. Check your internet and API address.",
-                ))
+            Err(ureq::Error::Transport(transport)) => {
+                // Only a failure to resolve or connect proves nothing was sent.
+                let unsent = matches!(
+                    transport.kind(),
+                    ureq::ErrorKind::Dns | ureq::ErrorKind::ConnectionFailed
+                );
+                return Err(HttpError::local(if unsent { UNSENT } else { UNREACHABLE }));
             }
         };
         let mut bytes = Vec::new();
@@ -443,6 +499,9 @@ impl Cabinet {
             });
         }
         let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        if edge_blocked(status, &value) {
+            return Err(HttpError::local(EDGE_BLOCKED));
+        }
         if !(200..300).contains(&status) {
             return Err(api_error(status, &value));
         }
@@ -739,6 +798,22 @@ fn protect(_: &[u8], _: bool) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_edge_refusal_counts_as_blocked() {
+        assert!(edge_blocked(
+            403,
+            &json!({"error": "forbidden", "ip": "203.0.113.7"})
+        ));
+        // The cabinet's own refusals must never be retried through another route.
+        assert!(!edge_blocked(403, &json!({"error": "Banned"})));
+        assert!(!edge_blocked(403, &json!({"error": "forbidden"})));
+        assert!(!edge_blocked(
+            401,
+            &json!({"error": "forbidden", "ip": "203.0.113.7"})
+        ));
+        assert!(!edge_blocked(403, &Value::Null));
+    }
 
     #[test]
     fn origins_allow_only_https_without_credentials_or_paths() {

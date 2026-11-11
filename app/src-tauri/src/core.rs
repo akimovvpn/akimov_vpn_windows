@@ -737,6 +737,12 @@ impl Engine {
         self.stop(None)
     }
 
+    /// Local port of the running core, 0 when disconnected. Lets account requests fall back to the VPN route.
+    pub fn proxy_port(&self) -> u16 {
+        let st = self.st.lock().unwrap();
+        st.run.as_ref().map(|r| r.mixed).unwrap_or(0)
+    }
+
     pub fn shutdown(&self) {
         self.closing.store(true, SeqCst);
         let _ = self.disconnect();

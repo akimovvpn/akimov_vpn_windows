@@ -61,8 +61,18 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Xray interoperability failed.' }
       - name: Build Windows setup installer
         working-directory: app
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          npx --yes @tauri-apps/cli@2.12.4 build --ci --bundles nsis -- --locked
+          if ($env:TAURI_SIGNING_PRIVATE_KEY) {
+            npx --yes @tauri-apps/cli@2.12.4 build --ci --bundles nsis -- --locked
+          } else {
+            # Without the signing key this release cannot be offered as an in-app update; it still installs by hand.
+            Write-Warning 'TAURI_SIGNING_PRIVATE_KEY is not set: building without update artifacts.'
+            '{"bundle":{"createUpdaterArtifacts":false}}' | Set-Content -Encoding ascii ../no-updater.json
+            npx --yes @tauri-apps/cli@2.12.4 build --ci --bundles nsis --config ../no-updater.json -- --locked
+          }
           if ($LASTEXITCODE -ne 0) { throw 'Installer build failed.' }
       - name: Package portable app, source and checksums
         run: |
@@ -70,7 +80,21 @@ jobs:
           $release = New-Item -ItemType Directory -Force release
           $setup = @(Get-ChildItem app/src-tauri/target/release/bundle/nsis/*-setup.exe)
           if ($setup.Count -ne 1) { throw 'Expected exactly one installer.' }
-          Copy-Item -LiteralPath $setup[0].FullName -Destination "release/akimov-vpn-$env:APP_VERSION-windows-x64-setup.exe"
+          $setupName = "akimov-vpn-$env:APP_VERSION-windows-x64-setup.exe"
+          Copy-Item -LiteralPath $setup[0].FullName -Destination "release/$setupName"
+          # The update feed the app reads. Only a signed installer is ever offered as an update.
+          $signature = "$($setup[0].FullName).sig"
+          if (Test-Path -LiteralPath $signature) {
+            @{
+              version = $env:APP_VERSION
+              notes = (Get-Content -Raw RELEASE_NOTES.md)
+              pub_date = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+              platforms = @{ 'windows-x86_64' = @{
+                signature = (Get-Content -Raw -LiteralPath $signature).Trim()
+                url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/v$env:APP_VERSION/$setupName"
+              } }
+            } | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 release/latest.json
+          }
           Compress-Archive -Path "app/dist/akimov-vpn-desktop-$env:APP_VERSION/*" -DestinationPath "release/akimov-vpn-$env:APP_VERSION-windows-x64-portable.zip"
           Copy-Item -LiteralPath .tools/mihomo-v1.19.33.zip -Destination release/mihomo-v1.19.33-upstream-source.zip
           Get-ChildItem release -File | Sort-Object Name | ForEach-Object { "{0}  {1}" -f (Get-FileHash -LiteralPath $_.FullName).Hash.ToLowerInvariant(), $_.Name } | Set-Content -Encoding ascii release/SHA256SUMS.txt

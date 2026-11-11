@@ -17,8 +17,67 @@ struct AccountGate(std::sync::Mutex<()>);
 type Gate<'a> = tauri::State<'a, AccountGate>;
 
 #[tauri::command(async)]
-fn cabinet_boot(c: Cab) -> Result<Value, String> {
+fn cabinet_boot(c: Cab, e: Eng) -> Result<Value, String> {
+    c.set_proxy(e.proxy_port());
     c.boot()
+}
+
+#[tauri::command]
+async fn update_check(app: tauri::AppHandle) -> Result<Value, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let update = app
+        .updater()
+        .map_err(|_| "Updates are unavailable.")?
+        .check()
+        .await
+        .map_err(|_| "Could not check for updates.")?;
+    Ok(match update {
+        Some(update) => serde_json::json!({"available": true, "version": update.version}),
+        None => serde_json::json!({"available": false}),
+    })
+}
+
+#[tauri::command]
+async fn update_install(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let update = app
+        .updater()
+        .map_err(|_| "Updates are unavailable.")?
+        .check()
+        .await
+        .map_err(|_| "Could not check for updates.")?
+        .ok_or("You already have the latest version.")?;
+    // download() verifies the signature against the public key built into this app; nothing unsigned is kept
+    let bytes = update
+        .download(|_, _| {}, || {})
+        .await
+        .map_err(|_| "The update could not be downloaded or verified.")?;
+    // the installer replaces the core: disconnect and stop it first
+    let engine = app.state::<Arc<core::Engine>>().inner().clone();
+    tauri::async_runtime::spawn_blocking(move || engine.shutdown())
+        .await
+        .map_err(|_| "Could not stop the VPN before updating.")?;
+    update
+        .install(bytes)
+        .map_err(|_| "The update could not be installed. Restart the app and try again.")?;
+    app.exit(0);
+    Ok(())
+}
+
+/// One check shortly after start; the window decides how to show it.
+fn announce_update(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        use tauri_plugin_updater::UpdaterExt;
+        std::thread::sleep(std::time::Duration::from_secs(20));
+        let found =
+            tauri::async_runtime::block_on(async { app.updater().ok()?.check().await.ok()? });
+        if let Some(update) = found {
+            let _ = app.emit(
+                "update-available",
+                serde_json::json!({"version": update.version}),
+            );
+        }
+    });
 }
 #[tauri::command(async)]
 fn cabinet_login(
@@ -39,10 +98,12 @@ fn cabinet_login(
 #[tauri::command(async)]
 fn cabinet_request(
     c: Cab,
+    e: Eng,
     method: String,
     path: String,
     body: Option<Value>,
 ) -> Result<Value, String> {
+    c.set_proxy(e.proxy_port());
     c.request(&method, &path, body)
 }
 #[tauri::command(async)]
@@ -311,9 +372,13 @@ fn main() {
             set_rules,
             set_mode,
             set_close_to_tray,
+            update_check,
+            update_install,
             watch
         ])
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
+            announce_update(app.handle().clone());
             use windows_sys::Win32::Graphics::Dwm::{
                 DwmSetWindowAttribute, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR,
                 DWMWA_USE_IMMERSIVE_DARK_MODE,

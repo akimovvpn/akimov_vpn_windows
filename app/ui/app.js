@@ -180,7 +180,7 @@ async function toggle(){
   if(S.conn!=="connected"&&(S.testing||S.refreshing))return;
   if(!S.signed_in&&S.conn!=="connected"){go("account");return}
   const attempt=++connectAttempt;S.busy=true;const connected=S.conn==="connected";setConn(connected?"connected":"connecting");
-  try{if(!connected&&!await ensureSubscription()){setConn("idle");go("subs");return}if(attempt!==connectAttempt)return;await invoke(connected?"disconnect":"connect");if(attempt!==connectAttempt)return;S.secs=0;S.conns=[];connEls.clear();setConn(connected?"idle":"connected");if(!connected)await loadNodes().catch(report);await watchTraffic()}
+  try{if(!connected&&!await ensureSubscription()){setConn("idle");go("subs");return}if(attempt!==connectAttempt)return;await invoke(connected?"disconnect":"connect");if(attempt!==connectAttempt)return;S.secs=0;S.conns=[];connEls.clear();setConn(connected?"idle":"connected");if(!connected){await loadNodes().catch(report);retryDelay=4000;void refreshScreen(S.screen).catch(background)}await watchTraffic()}
   catch(error){if(attempt!==connectAttempt)return;setConn("idle");throw error}
   finally{if(attempt===connectAttempt){S.busy=false;if(S.screen==="home")renderSide()}}
 }
@@ -309,10 +309,10 @@ const screens={
         ${S.pendingSwitch===s.id?(full?`<div class="swap"><div class="banner" style="margin:0 0 10px">All ${s.devices} device slots on this plan are taken.</div><div class="row"><button class="btn primary" data-act="go-devices">Manage devices</button><button class="btn quiet" data-act="switch-cancel">Cancel</button></div></div>`
           :`<div class="swap"><div class="cap" style="margin-bottom:10px">Switch now? ${S.conn==="connected"?"You will reconnect in a moment.":""}</div><div class="row"><button class="btn primary" data-act="switch-ok" data-id="${s.id}">Switch</button><button class="btn quiet" data-act="switch-cancel">Cancel</button></div></div>`)
         :`<div class="row plan-actions">${s.tariff||!act?`<button class="btn ${inUse||!act?"primary":""}" data-act="pay-renew" data-id="${s.id}">${s.tariff?"Renew":"Choose a plan"}</button>`:""}${act&&s.gb>0?`<button class="btn" data-act="pay-traffic" data-id="${s.id}">Add traffic</button>`:""}${act&&!inUse?`<button class="btn" data-act="switch" data-id="${s.id}">Use this plan</button>`:""}</div>`}
-      </article>`}).join("")}${S.subs.length?"":'<div class="card empty"><p>No plans yet. Choose a plan to get connected.</p><button class="btn primary" data-act="pay-buy">Choose a plan</button></div>'}</div>`},
+      </article>`}).join("")}${S.subs.length?"":S.me?'<div class="card empty"><p>No plans yet. Choose a plan to get connected.</p><button class="btn primary" data-act="pay-buy">Choose a plan</button></div>':skCard(4)+skCard(4)}</div>`},
 
   devices(){
-    const s=sub();if(!s)return head("Devices")+'<div class="card empty"><p>Choose a plan to manage its devices.</p><button class="btn primary" data-act="go" data-v="subs">Plans</button></div>';if(!S.deviceLoaded[s.id])return head("Devices")+'<div class="card empty">Loading devices…</div>';const list=S.devices[s.id]||[],max=s.devices;
+    const s=sub();if(!s&&S.signed_in&&!S.me)return skScreen("Devices",1);if(!s)return head("Devices")+'<div class="card empty"><p>Choose a plan to manage its devices.</p><button class="btn primary" data-act="go" data-v="subs">Plans</button></div>';if(!S.deviceLoaded[s.id])return skScreen("Devices",1);const list=S.devices[s.id]||[],max=s.devices;
     return head("Devices")+offline()+`<div class="card pad" style="margin-bottom:14px"><div class="row"><div class="grow"><div class="h">${num("devn",list.length)} of ${max?num("devm",max):"unlimited"} devices</div><div class="cap">${esc(s.plan)} plan. A device is added the first time it connects.</div></div>${max>0?`<button class="btn" data-act="pay-slot">${ic("plus","s")}Add a slot</button>`:""}</div>
       <div class="slots" style="margin-top:14px" aria-hidden="true">${Array.from({length:Math.min(max||list.length,100)},(_,i)=>`<i class="${i<list.length?(list[i].me?"me":"on"):""}"></i>`).join("")}</div></div>
       <div class="card clip"><div class="list stag" data-flip="devs">${list.length?list.map(d=>`<div class="dev" data-id="${esc(d.hwid)}">
@@ -326,12 +326,12 @@ const screens={
     return head("Settings")+`<div class="groups stag">
       ${group("Connection",`<div class="set mode-setting"><div class="grow"><div class="set-t">Mode</div><div class="cap dim">Whole device uses a virtual adapter. Browser only sets the system proxy.</div></div>${seg("mode",MODES,S.mode,"mode")}</div>`+`<div class="set"><div class="grow"><div class="set-t">Device identification</div><div class="cap dim">Hardware identification is required and cannot be disabled.</div></div><span class="pill ${S.hwidAvailable===false?"bad":"ok"}">${S.hwidAvailable===false?"Unavailable":"Required"}</span></div>`+navrow("rules","rules","Routing rules",S.rules.filter(r=>r.on).length+" of your own")+navrow("conns","conns","Traffic",S.conn==="connected"?S.conns.length+" open connections":"Where your traffic goes"))}
       ${group("Application",`<div class="set"><div class="grow"><div class="set-t">Keep running in the tray</div><div class="cap dim">${S.closeToTray?"Closing the window hides it. Quit from the tray menu.":"Closing the window disconnects and quits."}</div></div><button class="sw" role="switch" data-k="closetray" aria-checked="${S.closeToTray}" data-act="close-tray" aria-label="Keep running in the tray"></button></div>`)}
-      ${group("About",inforow("Version",S.version||"")+inforow("Core","mihomo · Windows"))}
+      ${group("About",inforow("Version",S.version||"")+inforow("Core","mihomo · Windows")+updateRow())}
       ${group("Legal",legalRows())}</div>`
   },
   account(){
     if(!S.signed_in)return signInScreen();
-    if(!S.me)return head("Account")+'<div class="card empty"><p>Your account service is temporarily unavailable.</p><button class="btn primary" data-act="account-refresh">Retry</button></div>';
+    if(!S.me)return skScreen("Account",4);
     const s=sub(),support=S.profile?.support_url,name=accountName(),active=s&&s.status==="active",soon=active&&s.days<=3,left=s?Math.max(0,s.gb-s.used):0;
     const pill=!s?"":!active?'<span class="pill bad">Expired</span>':soon?`<span class="pill warn">Ends in ${s.days} days</span>`:s.plan==="Trial"?'<span class="pill">Trial</span>':'<span class="pill ok">Active</span>';
     const action=!s?'<button class="btn primary block" data-act="pay-buy">Choose a plan</button>':s.tariff||!active?`<button class="btn primary block" data-act="pay-renew" data-id="${s.id}">${s.tariff?"Renew":"Choose a plan"}</button>`:'<button class="btn block" data-act="go" data-v="subs">All plans</button>';
@@ -361,7 +361,7 @@ const screens={
 function renderSide(){
   const el=$("#side");if(!el)return;const s=sub(),n=nodeOf(S.node),left=s?Math.max(0,s.gb-s.used):0,soon=s&&s.days<=3,exp=s&&s.status!=="active";
   el.innerHTML=`${S.profile?.announcement?`<section class="card pad col announcement"><h2 class="over">Announcement</h2><p class="cap">${esc(S.profile.announcement)}</p></section>`:""}<button class="card pad row" data-act="nodes" style="text-align:left;width:100%" aria-label="Choose a node"><span class="cc">${nodeFlag(n.id)}</span><span class="grow"><span style="font-weight:600;display:block">${esc(n.name)}</span><span class="cap dim">${esc(n.sub)}</span></span>${ic("chev","s")}</button>
-    <button class="card pad row" data-act="go" data-v="subs" style="text-align:left;width:100%" aria-label="Your plan"><span class="grow"><span style="font-weight:600;display:block">${s?esc(s.plan):S.signed_in?"Choose a plan":"Sign in to your account"}</span><span class="cap dim">${s?(exp?"Renew to connect":`${num("hd",s.days)} days · ${s.gb?num("hg",Math.round(left))+" GB left":"unlimited"}`):S.has_sub?"A connection profile is saved on this computer":"Your plans and devices in one place"}</span></span>${s?`<span class="pill ${exp?"bad":soon?"warn":"ok"}">${exp?"Expired":soon?"Ends soon":"Active"}</span>`:""}${ic("chev","s")}</button>
+    <button class="card pad row" data-act="go" data-v="subs" style="text-align:left;width:100%" aria-label="Your plan"><span class="grow"><span style="font-weight:600;display:block">${s?esc(s.plan):S.signed_in?(S.me?"Choose a plan":sk("120px",16)):"Sign in to your account"}</span><span class="cap dim">${s?(exp?"Renew to connect":`${num("hd",s.days)} days · ${s.gb?num("hg",Math.round(left))+" GB left":"unlimited"}`):S.signed_in&&!S.me?sk("190px",12):S.has_sub?"A connection profile is saved on this computer":"Your plans and devices in one place"}</span></span>${s?`<span class="pill ${exp?"bad":soon?"warn":"ok"}">${exp?"Expired":soon?"Ends soon":"Active"}</span>`:""}${ic("chev","s")}</button>
     <div class="card pad col only-d"><span class="over">Mode</span>${seg("mode",MODES,S.mode,"mode","wide")}</div>`;
   [...el.children].forEach((c,i)=>c.style.setProperty("--k",i+1));settle(el);
 }
@@ -383,7 +383,7 @@ let navT=0,enT=0,pendingPaint=null;const entered=()=>{clearTimeout(enT);enT=setT
 function go(v){
   if(!S.signed_in)v="account";
   if(v===S.screen)return;const m=$("#main");m.dataset.dir=ORDER.indexOf(v)>ORDER.indexOf(S.screen)?"f":"b";
-  S.screen=v;void refreshScreen(v).catch(report);void watchTraffic();S.edit=null;S.scopeFor=null;S.pendingSwitch=null;markNav();clearTimeout(navT);
+  S.screen=v;void refreshScreen(v).catch(background);void watchTraffic();S.edit=null;S.scopeFor=null;S.pendingSwitch=null;markNav();clearTimeout(navT);
   const swap=()=>{mem.n={};m.classList.remove("leave","enter");render();m.scrollTop=0;void m.offsetWidth;m.classList.add("enter");entered()};
   if(reduced())return swap();m.classList.add("leave");navT=setTimeout(swap,S.v===4?90:130);
 }
@@ -550,6 +550,20 @@ addEventListener("resize",markNav);
 /* ── Native engine and cabinet: no credentials leave the Rust bridge ───── */
 const invoke=(command,args)=>window.__TAURI__.core.invoke(command,args);
 const api=(method,path,body=null)=>invoke("cabinet_request",{method,path,body});
+/* placeholders shown until the first successful load; a failed load is not an empty account */
+const sk=(w,h=14)=>`<span class="sk" style="width:${w};height:${h}px"></span>`;
+const skCard=(rows=3)=>`<div class="card pad col" aria-hidden="true">${sk("42%",18)}${Array.from({length:rows},(_,i)=>sk(["86%","68%","54%","76%"][i%4])).join("")}</div>`;
+const skScreen=(title,cards=2)=>head(title)+`<div class="groups" aria-busy="true"><span class="sr-only" role="status">Loading…</span>${Array.from({length:cards},()=>`<section class="grp">${skCard()}</section>`).join("")}</div>`;
+/* background reads fail quietly: keep what is on screen and retry with one bounded timer. Only a rejected session speaks up. */
+let retryTimer=0,retryDelay=4000;
+function background(error){
+  if(/HTTP 401|not signed in|sign in again/i.test(String(error?.message||error))){report(error);return}
+  clearTimeout(retryTimer);
+  retryTimer=setTimeout(()=>{if(S.signed_in&&!document.hidden)refreshScreen(S.screen).then(()=>{retryDelay=4000}).catch(background)},retryDelay);
+  retryDelay=Math.min(retryDelay*2,60000);
+}
+S.update={state:"idle",version:""};
+const updateRow=()=>{const u=S.update,busy=u.state==="checking"||u.state==="installing";return `<div class="set"><div class="grow"><div class="set-t">${u.state==="available"||u.state==="installing"?"Version "+esc(u.version)+" is available":"App update"}</div><div class="cap dim">${{idle:"Signed releases are checked automatically.",checking:"Checking…",none:"You have the latest version.",available:"Installing disconnects the VPN and restarts the app.",installing:"Downloading and verifying…",error:"Could not check right now."}[u.state]}</div></div><button class="btn sm ${u.state==="available"?"primary":""}" data-act="${u.state==="available"?"update-install":"update-check"}" ${busy?"disabled":""}>${u.state==="available"?"Install":"Check"}</button></div>`};
 function friendlyError(error){
  if(/device identification/i.test(String(error?.message||error)))return "Device identification is unavailable. Restart Windows and try again.";
  const text=String(error?.message||error||'');
@@ -617,7 +631,7 @@ async function loadHistory(){
     const result=await api("GET","/me/transactions");
     if(!Array.isArray(result.transactions)||result.transactions.some(t=>!Number.isSafeInteger(t.amount_kopecks)||typeof t.type!=="string"))throw Error("invalid history");
     if(generation===historyGeneration&&S.signed_in&&S.me?.id===account)S.transactions=result.transactions;
-  }catch(error){if(generation===historyGeneration&&S.signed_in&&S.me?.id===account){S.historyError=friendlyError(error);report(error)}}
+  }catch(error){if(generation===historyGeneration&&S.signed_in&&S.me?.id===account){S.historyError=friendlyError(error);background(error)}}
   finally{if(generation===historyGeneration){S.historyLoading=false;paintScreen("balance")}}
 }
 function historyCard(){
@@ -659,7 +673,8 @@ async function loadNodes(){
 }
 let subscriptionPromise=null;
 async function ensureSubscription(){
-  if(!S.signed_in||!S.me)return false;
+  if(!S.signed_in)return false;
+  if(!S.me)return S.has_sub;
   if(sub()?.status!=="active")S.activeSub=S.subs.find(s=>s.status==="active")?.id??null;
   if(!S.activeSub)return false;
   if(S.has_sub&&S.engine_sub_id===S.activeSub)return true;
@@ -694,6 +709,8 @@ function signInScreen(){
 }
 
 act['subscription-refresh']=async()=>{if(S.refreshing||S.testing||!S.has_sub)return;S.refreshing=true;if(S.sheet==="nodes")renderSheet();if(S.screen==='settings'||S.screen==='subs')rr();try{engineBoot(await invoke('refresh_subscription'));await loadNodes();toast('Subscription updated.')}catch(error){report(error)}finally{S.refreshing=false;if(S.sheet==="nodes")renderSheet();if(S.screen==='settings'||S.screen==='subs')rr()}};
+act['update-check']=async()=>{if(S.update.state==="checking"||S.update.state==="installing")return;S.update={state:"checking",version:""};paintScreen("settings");try{const r=await invoke("update_check");S.update=r?.available?{state:"available",version:r.version}:{state:"none",version:""}}catch{S.update={state:"error",version:""}}paintScreen("settings")};
+act['update-install']=async()=>{if(S.update.state!=="available")return;const version=S.update.version;S.update={state:"installing",version};paintScreen("settings");try{await invoke("update_install")}catch(error){S.update={state:"available",version};paintScreen("settings");throw error}};
 act['close-tray']=async()=>{const on=!S.closeToTray;await invoke('set_close_to_tray',{on});S.closeToTray=on;rr()};
 act['profile-link']=el=>{const url=S.profile?.[el.dataset.v];if(url)return invoke('open_external',{url})};
 let nameSaving=false;
@@ -858,7 +875,7 @@ document.addEventListener('submit',async event=>{
 });
 
 document.addEventListener("change",event=>{if(event.target.id==="topup-amount"&&S.pay&&!S.pay.busy){S.pay.amount=Math.round(Number(event.target.value)*100);renderSheet()}});
-document.addEventListener("visibilitychange",()=>{if(document.hidden){cancelAnimationFrame(frameHandle);frameHandle=0;stopPaymentPoll()}else{startAnimation();if(S.pay?.step==="wait"&&S.sheet==="pay")checkPayment().catch(report);refreshScreen(S.screen).catch(report)}watchTraffic().catch(report)});
+document.addEventListener("visibilitychange",()=>{if(document.hidden){cancelAnimationFrame(frameHandle);frameHandle=0;stopPaymentPoll()}else{startAnimation();if(S.pay?.step==="wait"&&S.sheet==="pay")checkPayment().catch(report);refreshScreen(S.screen).catch(background)}watchTraffic().catch(report)});
 async function boot(){
   readTheme();resample();buildShell();render();$("#main").classList.add("enter");entered();
   void loadLegal();
@@ -867,10 +884,11 @@ async function boot(){
     [["#timer",clock(p.secs)],["#bt",clock(p.secs)],["#dn",rate(p.dn)],["#up",rate(p.up)],["#bdn",rate(p.dn)],["#bup",rate(p.up)]].forEach(([selector,value])=>{const el=$(selector);if(el)el.textContent=value});
     if(p.conns&&!S.paused){const counts=new Map();const previous=new Map(S.conns.map(c=>[c.id,c]));S.conns=p.conns.map(c=>{const signature=JSON.stringify([c.host,c.port,c.proc,c.chains]),i=counts.get(signature)||0;counts.set(signature,i+1);const key=c.id||signature+":"+i;let id=trafficIds.get(key);if(!id){id=++uid;trafficIds.set(key,id)}const target=(c.chains||[]).some(n=>/reject|block/i.test(n))?"@block":(c.chains||[]).some(n=>/^direct$/i.test(n))?"@direct":"@proxy";const own=S.rules.find(r=>r.on&&r.type.replace(/[-_]/g,"").toUpperCase()===(c.rule||"").replace(/[-_]/g,"").toUpperCase()&&r.value===c.payload);return{...c,host:c.host||"",proc:c.proc||"",id,route:TARGET[target][1],origin:own?"user":c.rule==="Match"||c.rule==="MATCH"?"default":"plan",rule:c.rule&&c.rule.toUpperCase()!=="MATCH"?{type:c.rule,value:c.payload||"",target}:null,dirty:!previous.has(id)||previous.get(id).route!==TARGET[target][1]||previous.get(id).rule?.value!==(c.payload||"")}});const ids=new Set(S.conns.map(c=>c.id));for(const[id,el]of connEls)if(!ids.has(id)){collapse(el,()=>el.remove());connEls.delete(id)}if(trafficIds.size>1000)for(const[key,id]of trafficIds)if(!ids.has(id))trafficIds.delete(key);if(S.screen==="conns")syncConns()}
   });
+  await window.__TAURI__.event.listen("update-available",({payload})=>{if(S.update.state==="installing")return;S.update={state:"available",version:String(payload?.version||"")};paintScreen("settings");toast("Version "+S.update.version+" is available.",[["Install",()=>act["update-install"]().catch(report)]])});
   await window.__TAURI__.event.listen("tray-toggle",()=>{toggle().catch(report)});
   await window.__TAURI__.event.listen("dropped",()=>{S.conns=[];connEls.clear();S.secs=0;setConn("idle");if(["home","conns"].includes(S.screen))rr();toast("Disconnected. The VPN core stopped.")});
   const core=await invoke("boot");engineBoot(core);paintScreen(S.screen);
-  try{S.cabinet=await invoke("cabinet_boot");S.signed_in=S.cabinet.signed_in;if(S.cabinet.me)applyMe(S.cabinet.me);if(S.cabinet.error)report(S.cabinet.error)}catch(error){report(error)}finally{S.restoring=false;paintScreen(S.screen)}
+  try{S.cabinet=await invoke("cabinet_boot");S.signed_in=S.cabinet.signed_in;if(S.cabinet.me)applyMe(S.cabinet.me);if(S.cabinet.error)background(S.cabinet.error)}catch(error){background(error)}finally{S.restoring=false;paintScreen(S.screen)}
   if(S.signed_in&&await ensureSubscription())await loadNodes();
   document.fonts?.ready.then(markNav);setTimeout(markNav,300);
 }

@@ -8,6 +8,10 @@ Account features include plans, device management, wallet history, promo codes, 
 
 Closing hides the app to the tray by default. Disable **Settings → Application → Keep running in the tray** to quit on close. Tray **Quit** disconnects and exits. An idle app does not keep a core process running; disconnected latency tests use a temporary core without changing system routing.
 
+The installed app checks for a newer release shortly after start and from **Settings → About**. An update is installed only if its signature matches the public key built into the app; installing disconnects the VPN first. Releases are signed in CI with the `TAURI_SIGNING_PRIVATE_KEY` repository secret; a release built without it installs by hand but is not offered as an in-app update.
+
+If the account service cannot be reached, account screens show loading placeholders and retry in the background, and a saved profile can still connect. While connected, account requests that are refused on the direct route go through the VPN.
+
 ## Build
 
 Install Rust MSVC, Visual Studio C++ Build Tools, Node.js 24+, Go 1.26.10, and Git. Then:
