@@ -10,7 +10,7 @@ Closing hides the app to the tray by default. Disable **Settings → Application
 
 The installed app checks for a newer release shortly after start and from **Settings → About**. An update is installed only if its signature matches the public key built into the app; installing disconnects the VPN first. Releases are signed in CI with the `TAURI_SIGNING_PRIVATE_KEY` repository secret; a release built without it installs by hand but is not offered as an in-app update.
 
-If the account service cannot be reached, account screens show loading placeholders and retry in the background, and a saved profile can still connect. While connected, account requests that are refused on the direct route go through the VPN.
+The last loaded account data and legal documents are saved on this computer. If the account service cannot be reached they are shown as they were and refreshed in the background; a saved profile can still connect, and rules, traffic, settings and updates do not need the account service. Uninstalling removes all saved data for the user; updating keeps it. While connected, account requests that are refused on the direct route go through the VPN.
 
 ## Build
 

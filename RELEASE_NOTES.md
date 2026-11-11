@@ -1,10 +1,10 @@
-akimov vpn 1.0.2 for Windows 10/11 x64.
+akimov vpn 1.0.3 for Windows 10/11 x64.
 
-- An account that has not loaded yet is no longer shown as an empty account or as an error. Account, Plans and Devices show loading placeholders until the first successful answer, keep the last loaded data afterwards, and retry quietly in the background.
-- A saved connection profile can connect while the account service is unreachable. Account data refreshes as soon as the VPN is up.
-- Account requests fall back to the VPN route when the direct route is refused before reaching the account service. This fixes account screens in Browser only mode on networks where the API address is not reachable directly.
-- Settings uses two columns that fill independently, so short groups no longer leave empty space.
-- In-app updates: the app checks for a newer signed release shortly after start and from Settings → About. Installing verifies the release signature, disconnects the VPN, runs the installer and restarts the app.
+- The last loaded account, plans, devices, balance history and legal documents are saved on this computer. When the account service cannot be reached they are shown as they were and refresh quietly once it answers again.
+- Account opens without the account service: Traffic, Routing rules, Settings, app updates and Sign out stay available. Only the profile card waits for data.
+- A saved connection profile connects even when the selected plan cannot be fetched.
+- Back returns to where a screen was opened from: Plans opened from Home goes back to Home, from Account back to Account.
+- Uninstalling now removes everything the app saved for this user: session, connection profile, rules, settings and cached account data. Updating keeps it.
 
 Choose setup.exe to install, or extract the portable ZIP with its core folder. In-app updates need the installed version. The installer is not code-signed for Windows SmartScreen; update packages are signed and verified by the app. Your other VPN is not disabled by this update.
 

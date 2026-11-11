@@ -17,7 +17,7 @@ const me = {id:1,email:'fixture@example.invalid',balance:100000,discount:{percen
   {id:77,plan:'Fixture <plan>',tariff_id:2,status:'active',days_left:30,term_days:90,expires_at:'2027-01-01T00:00:00Z',traffic_gb:500,used_gb:125,devices:5,plan_devices:5,plan_traffic_gb:500,extra_device_price_kopecks:1500,extra_gb_price_kopecks:5000,addon_months_remaining:2,renew_price_per_30_kopecks:25001},
   {id:78,plan:'Second',tariff_id:2,status:'active',days_left:60,term_days:90,expires_at:'2027-02-01T00:00:00Z',traffic_gb:100,used_gb:0,devices:3}
 ]};
-let deleteWait=null,buyTerminal=false,buyWait=null,connectWait=null,connectError=null,buyFails=1,promoFails=false,core={has_sub:true,connected:false,rules:[],mode:'tun',node:'Fixture <server>',hwid:'own/hwid',sub_id:77,version:'0.1.0'};
+let offline=false,deleteWait=null,buyTerminal=false,buyWait=null,connectWait=null,connectError=null,buyFails=1,promoFails=false,core={has_sub:true,connected:false,rules:[],mode:'tun',node:'Fixture <server>',hwid:'own/hwid',sub_id:77,version:'0.1.0'};
 const document={hidden:false,documentElement:element(),activeElement:element(),fonts:{ready:Promise.resolve()},querySelector:query,querySelectorAll:()=>[],createElement:element,addEventListener:(name,fn)=>(handlers[name]??=[]).push(fn)};
 const context = vm.createContext({document,window:{__TAURI__:{event:{listen:async(name,fn)=>events[name]=fn},core:{invoke:async(name,args)=>{
   calls.push([name,args]);
@@ -29,9 +29,10 @@ const context = vm.createContext({document,window:{__TAURI__:{event:{listen:asyn
   if(name==='connect'){if(connectWait)return await connectWait;if(connectError)throw connectError;core.connected=true;return {ms:300}}
   if(name==='disconnect'){core.connected=false;return {ok:true}}
   if(name==='clear_subscription'){if(args?.expectedSubId&&args.expectedSubId!==core.sub_id)return {ok:true};core.has_sub=false;core.sub_id=null;return {ok:true}}
-  if(name==='cabinet_use_subscription'){core.sub_id=args.subId;core.has_sub=true;return {...core}}
+  if(name==='cabinet_use_subscription'){if(offline)throw 'Cabinet connection failed. Check your internet and API address.';core.sub_id=args.subId;core.has_sub=true;return {...core}}
   if(name==='proxies'||name==='test_latency')return {nodes:[{name:'Fixture <server>',delay:30}],now:'Fixture <server>'};
   if(name==='cabinet_request'){
+    if(offline)throw 'Cabinet connection failed. Check your internet and API address.';
     if(args.path==='/legal')return {version:'2026-10-21',docs:[{key:'offer',title:'Public offer',url:'https://example.invalid/offer'},{key:'privacy',title:'Privacy policy',url:'https://example.invalid/privacy'}]};
     if(args.path==='/me/transactions')return {transactions:[{id:1,type:'topup',amount_kopecks:1234,status:'completed',created_at:'2026-11-10T10:00:00Z',description:'Fixture credit'},{id:2,type:'purchase',amount_kopecks:-567,status:'completed',created_at:'2026-11-09T10:00:00Z',description:'<plan>'}]};
     if(args.path==='/promo'&&promoFails)throw 'HTTP 503 internal failure';
@@ -113,7 +114,18 @@ const flush = () => new Promise(resolve=>setImmediate(resolve));
   run('S.has_sub=true');assert.equal(await run('ensureSubscription()'),true,'a saved profile stays usable while the account loads');
   run('S.has_sub=false');assert.equal(await run('ensureSubscription()'),false);
   run('background(Error("Cabinet connection failed. Check your internet and API address."))');assert.equal(run('toasts'),0,'background failures do not toast');
-  assert.equal(run('retryDelay'),8000,'retry backs off');run('clearTimeout(retryTimer);retryDelay=4000');
+  assert.equal(run('retryDelay'),8000,'retry backs off');run('clearTimeout(retryTimer);retryTimer=0;retryDelay=4000');
+  assert.match(run('screens.account()'),/data-act="logout"[\s\S]*data-v="rules"[\s\S]*data-v="settings"/,'Account stays usable before the account loads');
+  // the last good answers are saved, and serve the screens while the service cannot be reached
+  assert.equal(JSON.parse(storage['cab:/me']).id,1,'the account is saved after a successful load');
+  offline=true;
+  assert.equal((await run('api("GET","/me")')).id,1,'an unreachable service serves the saved account');
+  await run('refreshMe()');assert.equal(run('S.me.id'),1);assert.equal(run('toasts'),0);assert.match(run('screens.account()'),/fixture@example\.invalid/);
+  await run('loadLegal(true)');assert.match(run('legalRows()'),/Public offer/,'saved documents show offline');
+  await assert.rejects(run('api("POST","/promo",{code:"X"})'),/connection failed/,'changes are never answered from saved data');
+  await assert.rejects(run('api("GET","/checkout/1")'),/connection failed/,'payment status is never answered from saved data');
+  run('S.engine_sub_id=null;S.has_sub=true');assert.equal(await run('ensureSubscription()'),true,'a saved profile connects when the plan cannot be fetched');
+  offline=false;run('clearTimeout(retryTimer);retryTimer=0;retryDelay=4000;S.engine_sub_id=77');
   run('S.me=keepMe;S.subs=keepSubs;S.has_sub=keepHas;toast=realToast');
   assert.match(run('screens.subs()'),/data-flip="subs"/);
   assert.doesNotMatch(run('screens.settings()'),/Appearance|Advanced|Account service|<h2 class="over">Subscription|data-act="theme"/);
@@ -133,6 +145,9 @@ const flush = () => new Promise(resolve=>setImmediate(resolve));
   assert.match(run(`head('Settings')`),/data-v="account"/,'Settings returns to Account');
   for(const screen of ['conns','rules','subs','devices','referral']) {run(`S.screen='${screen}'`);assert.match(run(`head('Child')`),/data-v="account"/)}
   run(`go('account')`);assert.match(run(`head('Account')`),/data-v="home"/,'root account returns Home');
+  run(`go('home');go('subs')`);assert.match(run(`head('Plans')`),/data-v="home"/,'Plans opened from Home returns Home');
+  run(`go('account');go('subs')`);assert.match(run(`head('Plans')`),/data-v="account"/,'Plans opened from Account returns Account');
+  run(`go('account')`);
   let releaseConnect;connectWait=new Promise(resolve=>releaseConnect=resolve);
   const connecting=run('toggle()');await flush();assert.equal(run('S.conn'),'connecting');
   await run('toggle()');assert.equal(calls.at(-1)[0],'disconnect');releaseConnect({ms:300});await connecting;connectWait=null;

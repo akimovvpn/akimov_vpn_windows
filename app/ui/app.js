@@ -253,7 +253,7 @@ function markNav(){
   if(a&&a.offsetParent)ind.style.cssText=`left:${a.offsetLeft}px;top:${a.offsetTop}px;width:${a.offsetWidth}px;height:${a.offsetHeight}px;opacity:1`;else ind.style.opacity=0;
 }
 const offline=()=>S.me?.maintenance?.enabled?`<div class="banner">${ic("warn","s")}<span>${esc(S.me.maintenance.message||"The account service is under maintenance.")}</span></div>`:"";
-const head=(t,extra="")=>`<div class="head"><button class="btn back" data-act="go" data-v="${S.screen==="account"?"home":"account"}" aria-label="Back">${ic("back")}</button><h1 class="title">${t}</h1><span class="sp"></span>${extra}</div>`;
+const head=(t,extra="")=>`<div class="head"><button class="btn back" data-act="go" data-v="${S.screen==="account"?"home":S.from[S.screen]||"account"}" aria-label="Back">${ic("back")}</button><h1 class="title">${t}</h1><span class="sp"></span>${extra}</div>`;
 const MODES=[["tun","Whole device"],["proxy","Browser only"]];
 function ruleTypePicker(){
   return `<details class="rule-types" id="ctype"><summary class="select" aria-label="Rule type"><span id="ctype-label" class="grow">${esc(TYPES.find(t=>t[0]===S.comp.type)[1])}</span>${ic("chev","s")}</summary><div class="rule-type-list" role="group" aria-label="Choose rule type">${TYPES.map(t=>`<button class="btn" type="button" data-act="rule-type" data-v="${t[0]}" aria-pressed="${S.comp.type===t[0]}">${esc(t[1])}${ic("check","s")}</button>`).join("")}</div></details>`;
@@ -331,19 +331,18 @@ const screens={
   },
   account(){
     if(!S.signed_in)return signInScreen();
-    if(!S.me)return skScreen("Account",4);
-    const s=sub(),support=S.profile?.support_url,name=accountName(),active=s&&s.status==="active",soon=active&&s.days<=3,left=s?Math.max(0,s.gb-s.used):0;
+    const me=S.me,s=sub(),support=S.profile?.support_url,name=accountName(),active=s&&s.status==="active",soon=active&&s.days<=3,left=s?Math.max(0,s.gb-s.used):0;
     const pill=!s?"":!active?'<span class="pill bad">Expired</span>':soon?`<span class="pill warn">Ends in ${s.days} days</span>`:s.plan==="Trial"?'<span class="pill">Trial</span>':'<span class="pill ok">Active</span>';
-    const action=!s?'<button class="btn primary block" data-act="pay-buy">Choose a plan</button>':s.tariff||!active?`<button class="btn primary block" data-act="pay-renew" data-id="${s.id}">${s.tariff?"Renew":"Choose a plan"}</button>`:'<button class="btn block" data-act="go" data-v="subs">All plans</button>';
+    const action=!me&&!s?"":!s?'<button class="btn primary block" data-act="pay-buy">Choose a plan</button>':s.tariff||!active?`<button class="btn primary block" data-act="pay-renew" data-id="${s.id}">${s.tariff?"Renew":"Choose a plan"}</button>`:'<button class="btn block" data-act="go" data-v="subs">All plans</button>';
     return head("Account")+`<div class="groups stag">
       <section class="grp profile"><div class="card pcard col">
-        <div class="row"><span class="avatar" aria-hidden="true">${esc((name.trim()[0]||"a").toUpperCase())}</span><div class="grow"><div class="pname">${esc(name)}</div><div class="cap dim">${S.me?.telegram_linked?"Telegram linked":"Your account"}</div></div><button class="btn sm quiet danger" data-act="logout">${ic("logout","s")}Sign out</button></div>
+        <div class="row"><span class="avatar" aria-hidden="true">${esc((name.trim()[0]||"a").toUpperCase())}</span><div class="grow"><div class="pname">${me?esc(name):sk("160px",20)}</div><div class="cap dim">${me?(me.telegram_linked?"Telegram linked":"Your account"):"Loading your account…"}</div></div><button class="btn sm quiet danger" data-act="logout">${ic("logout","s")}Sign out</button></div>
         <div class="profile-plan ${s?"":"no-plan"}">${s?`<div class="profile-plan-name"><h2 class="h">${esc(s.plan)}</h2>${pill}</div>
         <div class="kv"><div><div class="over">Time left</div><div class="num">${num("pd",s.days)}<small>days</small></div><div class="cap dim">${active?"until":"ended"} ${esc(s.expires)}</div></div>
-          <div><div class="over">Traffic left</div><div class="num">${s.gb?num("pg",Math.round(left)):"∞"}<small>${s.gb?"GB":"unlimited"}</small></div></div></div>`:'<div class="cap">No plan yet. Choose one to get connected.</div>'}
+          <div><div class="over">Traffic left</div><div class="num">${s.gb?num("pg",Math.round(left)):"∞"}<small>${s.gb?"GB":"unlimited"}</small></div></div></div>`:me?'<div class="cap">No plan yet. Choose one to get connected.</div>':`<div class="col" aria-busy="true">${sk("42%",18)}${sk("68%")}</div>`}
         <div class="profile-action">${action}</div></div></div></section>
-      ${group("Plan",navrow("subs","plans","Plans",s?s.plan+" · "+s.days+" days left":"Choose your plan")+navrow("devices","devices","Devices",s?(S.deviceLoaded[s.id]?S.devices[s.id].length+" of "+(s.devices||"unlimited"):"Manage connected devices"):"Your connected devices"))}
-      ${group("Payments",navrow("balance","wallet","Balance",rub(S.balance)))}
+      ${group("Plan",navrow("subs","plans","Plans",s?s.plan+" · "+s.days+" days left":me?"Choose your plan":"Your plans")+navrow("devices","devices","Devices",s?(S.deviceLoaded[s.id]?S.devices[s.id].length+" of "+(s.devices||"unlimited"):"Manage connected devices"):"Your connected devices"))}
+      ${group("Payments",navrow("balance","wallet","Balance",me?rub(S.balance):"—"))}
       ${group("Connection",navrow("conns","conns","Traffic",S.conn==="connected"?S.conns.length+" open connections":"Where your traffic goes")+navrow("rules","rules","Routing rules",S.rules.filter(r=>r.on).length+" of your own"))}
       ${group("Bonuses",navrow("referral","gift","Referral program","Invite friends, earn balance")+navrow("promo","tag","Promo code","Add a code to your account","promo"))}
       ${group("Application",navrow("settings","settings","Settings","Connection, documents, about")+(support?`<button class="set navrow" data-act="profile-link" data-v="support_url">${ic("help")}<span class="grow set-t">Support</span>${ic("ext","s")}</button>`:""))}</div>`
@@ -361,7 +360,7 @@ const screens={
 function renderSide(){
   const el=$("#side");if(!el)return;const s=sub(),n=nodeOf(S.node),left=s?Math.max(0,s.gb-s.used):0,soon=s&&s.days<=3,exp=s&&s.status!=="active";
   el.innerHTML=`${S.profile?.announcement?`<section class="card pad col announcement"><h2 class="over">Announcement</h2><p class="cap">${esc(S.profile.announcement)}</p></section>`:""}<button class="card pad row" data-act="nodes" style="text-align:left;width:100%" aria-label="Choose a node"><span class="cc">${nodeFlag(n.id)}</span><span class="grow"><span style="font-weight:600;display:block">${esc(n.name)}</span><span class="cap dim">${esc(n.sub)}</span></span>${ic("chev","s")}</button>
-    <button class="card pad row" data-act="go" data-v="subs" style="text-align:left;width:100%" aria-label="Your plan"><span class="grow"><span style="font-weight:600;display:block">${s?esc(s.plan):S.signed_in?(S.me?"Choose a plan":sk("120px",16)):"Sign in to your account"}</span><span class="cap dim">${s?(exp?"Renew to connect":`${num("hd",s.days)} days · ${s.gb?num("hg",Math.round(left))+" GB left":"unlimited"}`):S.signed_in&&!S.me?sk("190px",12):S.has_sub?"A connection profile is saved on this computer":"Your plans and devices in one place"}</span></span>${s?`<span class="pill ${exp?"bad":soon?"warn":"ok"}">${exp?"Expired":soon?"Ends soon":"Active"}</span>`:""}${ic("chev","s")}</button>
+    <button class="card pad row" data-act="go" data-v="subs" style="text-align:left;width:100%" aria-label="Your plan"><span class="grow"><span style="font-weight:600;display:block">${s?esc(s.plan):S.signed_in?(S.me?"Choose a plan":S.has_sub?"Your plan":sk("120px",16)):"Sign in to your account"}</span><span class="cap dim">${s?(exp?"Renew to connect":`${num("hd",s.days)} days · ${s.gb?num("hg",Math.round(left))+" GB left":"unlimited"}`):S.has_sub?"A connection profile is saved on this computer":S.signed_in&&!S.me?sk("190px",12):"Your plans and devices in one place"}</span></span>${s?`<span class="pill ${exp?"bad":soon?"warn":"ok"}">${exp?"Expired":soon?"Ends soon":"Active"}</span>`:""}${ic("chev","s")}</button>
     <div class="card pad col only-d"><span class="over">Mode</span>${seg("mode",MODES,S.mode,"mode","wide")}</div>`;
   [...el.children].forEach((c,i)=>c.style.setProperty("--k",i+1));settle(el);
 }
@@ -383,6 +382,7 @@ let navT=0,enT=0,pendingPaint=null;const entered=()=>{clearTimeout(enT);enT=setT
 function go(v){
   if(!S.signed_in)v="account";
   if(v===S.screen)return;const m=$("#main");m.dataset.dir=ORDER.indexOf(v)>ORDER.indexOf(S.screen)?"f":"b";
+  if(v!=="home"&&v!=="account")S.from[v]=S.screen==="home"?"home":"account";
   S.screen=v;void refreshScreen(v).catch(background);void watchTraffic();S.edit=null;S.scopeFor=null;S.pendingSwitch=null;markNav();clearTimeout(navT);
   const swap=()=>{mem.n={};m.classList.remove("leave","enter");render();m.scrollTop=0;void m.offsetWidth;m.classList.add("enter");entered()};
   if(reduced())return swap();m.classList.add("leave");navT=setTimeout(swap,S.v===4?90:130);
@@ -549,7 +549,17 @@ addEventListener("resize",markNav);
 
 /* ── Native engine and cabinet: no credentials leave the Rust bridge ───── */
 const invoke=(command,args)=>window.__TAURI__.core.invoke(command,args);
-const api=(method,path,body=null)=>invoke("cabinet_request",{method,path,body});
+/* last good answers are kept on this computer: an unreachable account service shows them and retries quietly */
+const CACHED=/^\/(me|me\/transactions|devices\?sub_id=\d+|referral|tariffs|legal)$/;
+const cacheGet=path=>{try{return JSON.parse(localStorage.getItem("cab:"+path))}catch{return null}};
+const cachePut=(path,value)=>{try{localStorage.setItem("cab:"+path,JSON.stringify(value))}catch{}};
+const cacheClear=()=>{try{Object.keys(localStorage).filter(k=>k.startsWith("cab:")&&k!=="cab:/legal").forEach(k=>localStorage.removeItem(k))}catch{}};
+const unreachable=error=>/cabinet connection failed/i.test(String(error?.message||error));
+async function api(method,path,body=null){
+  const keep=method==="GET"&&CACHED.test(path);
+  try{const result=await invoke("cabinet_request",{method,path,body});retryDelay=4000;if(keep)cachePut(path,result);return result}
+  catch(error){const old=keep&&unreachable(error)?cacheGet(path):null;if(!old)throw error;background(error);return old}
+}
 /* placeholders shown until the first successful load; a failed load is not an empty account */
 const sk=(w,h=14)=>`<span class="sk" style="width:${w};height:${h}px"></span>`;
 const skCard=(rows=3)=>`<div class="card pad col" aria-hidden="true">${sk("42%",18)}${Array.from({length:rows},(_,i)=>sk(["86%","68%","54%","76%"][i%4])).join("")}</div>`;
@@ -558,11 +568,11 @@ const skScreen=(title,cards=2)=>head(title)+`<div class="groups" aria-busy="true
 let retryTimer=0,retryDelay=4000;
 function background(error){
   if(/HTTP 401|not signed in|sign in again/i.test(String(error?.message||error))){report(error);return}
-  clearTimeout(retryTimer);
-  retryTimer=setTimeout(()=>{if(S.signed_in&&!document.hidden)refreshScreen(S.screen).then(()=>{retryDelay=4000}).catch(background)},retryDelay);
+  if(retryTimer)return;
+  retryTimer=setTimeout(()=>{retryTimer=0;if(S.signed_in&&!document.hidden)refreshScreen(S.screen).catch(background)},retryDelay);
   retryDelay=Math.min(retryDelay*2,60000);
 }
-S.update={state:"idle",version:""};
+S.update={state:"idle",version:""};S.from={};
 const updateRow=()=>{const u=S.update,busy=u.state==="checking"||u.state==="installing";return `<div class="set"><div class="grow"><div class="set-t">${u.state==="available"||u.state==="installing"?"Version "+esc(u.version)+" is available":"App update"}</div><div class="cap dim">${{idle:"Signed releases are checked automatically.",checking:"Checking…",none:"You have the latest version.",available:"Installing disconnects the VPN and restarts the app.",installing:"Downloading and verifying…",error:"Could not check right now."}[u.state]}</div></div><button class="btn sm ${u.state==="available"?"primary":""}" data-act="${u.state==="available"?"update-install":"update-check"}" ${busy?"disabled":""}>${u.state==="available"?"Install":"Check"}</button></div>`};
 function friendlyError(error){
  if(/device identification/i.test(String(error?.message||error)))return "Device identification is unavailable. Restart Windows and try again.";
@@ -589,7 +599,7 @@ function friendlyError(error){
  if(/network|connection failed|could not reach|internet/i.test(text))return 'The connection could not be completed. Try again shortly.';
  return 'Something went wrong. Try again later.';
 }
-function report(error){const raw=String(error?.message||error);toast(friendlyError(error));if(/HTTP 401|not signed in|sign in again/i.test(raw)){S.signed_in=false;S.me=null;S.subs=[];S.devices={};S.deviceLoaded={};S.balance=0;stopPaymentPoll();S.pay=null;S.sheet=null;go('account');renderSheet();if(S.screen==='account')rr()}}
+function report(error){const raw=String(error?.message||error);toast(friendlyError(error));if(/HTTP 401|not signed in|sign in again/i.test(raw)){cacheClear();S.signed_in=false;S.me=null;S.subs=[];S.devices={};S.deviceLoaded={};S.balance=0;stopPaymentPoll();S.pay=null;S.sheet=null;go('account');renderSheet();if(S.screen==='account')rr()}}
 
 const accountName=()=>S.me?.email||S.me?.first_name||S.me?.username||"Your account";
 function engineBoot(data){
@@ -601,7 +611,7 @@ function engineBoot(data){
 }
 function applyMe(me){
   if(S.me?.id!==me.id){S.transactions=null;S.historyError="";S.historyLoading=false;historyGeneration++}
-  S.me=me;S.signed_in=true;S.balance=me.balance;
+  S.me=me;S.signed_in=true;S.balance=me.balance;cachePut("/me",me);
   METHODS.splice(1,METHODS.length,...(me.payment_methods||[]).map(m=>({id:m.id,name:m.name,fee:m.fee_percent,note:"Open secure payment in your browser"})));
   S.subs=(me.subscriptions||[]).map(s=>({...s,tariff:s.tariff_id,days:s.days_left,term:s.term_days||Math.max(1,s.days_left),gb:s.traffic_gb,used:s.used_gb,expires:s.expires_at?new Date(s.expires_at).toLocaleDateString("en-GB",{day:"numeric",month:"long"}):"—"}));
   if(!sub())S.activeSub=S.subs.find(s=>s.id===S.engine_sub_id)?.id??S.subs.find(s=>s.status==="active")?.id??S.subs[0]?.id??null;
@@ -679,7 +689,7 @@ async function ensureSubscription(){
   if(!S.activeSub)return false;
   if(S.has_sub&&S.engine_sub_id===S.activeSub)return true;
   if(!subscriptionPromise)subscriptionPromise=useSubscription(S.activeSub).finally(()=>subscriptionPromise=null);
-  await subscriptionPromise;
+  try{await subscriptionPromise}catch(error){if(!S.has_sub||!unreachable(error))throw error;background(error);return true}
   return S.has_sub&&S.engine_sub_id===S.activeSub;
 }
 function applyNodes(result){
@@ -827,7 +837,7 @@ async function checkPayment(){
 }
 Object.assign(act,{
   signin:()=>go("account"),"account-refresh":()=>refreshScreen(S.screen),cabinet:()=>invoke("open_external",{url:S.cabinet.cabinet_url}),
-  logout:async()=>{if(S.conn==="connected"){await invoke("disconnect");setConn("idle")}await invoke("cabinet_logout");engineBoot(await invoke("boot"));stopPaymentPoll();S.pay=null;S.sheet=null;S.signed_in=false;S.me=null;S.subs=[];S.devices={};S.deviceLoaded={};S.balance=0;S.referral=null;S.activeSub=null;go("account");renderSheet();rr()},
+  logout:async()=>{if(S.conn==="connected"){await invoke("disconnect");setConn("idle")}await invoke("cabinet_logout");cacheClear();engineBoot(await invoke("boot"));stopPaymentPoll();S.pay=null;S.sheet=null;S.signed_in=false;S.me=null;S.subs=[];S.devices={};S.deviceLoaded={};S.balance=0;S.referral=null;S.activeSub=null;go("account");renderSheet();rr()},
   mode:async el=>{if(S.mode===el.dataset.v)return;if(S.conn!=="idle"||S.busy)throw Error("Disconnect before changing mode.");await invoke("set_mode",{mode:el.dataset.v});S.mode=el.dataset.v;S.screen==="home"?renderSide():rr();renderBar()},
   nodes:async()=>{if(!await ensureSubscription()){go("subs");return}await loadNodes();S.sheet="nodes";renderSheet()},
   node:async el=>{await invoke("select_node",{name:el.dataset.v});S.node=el.dataset.v;S.just="n"+S.node;renderSheet();setTimeout(()=>{closeSheet();S.screen==="home"?(renderSide(),renderStatus()):rr();renderBar()},reduced()?0:320)},
@@ -888,7 +898,7 @@ async function boot(){
   await window.__TAURI__.event.listen("tray-toggle",()=>{toggle().catch(report)});
   await window.__TAURI__.event.listen("dropped",()=>{S.conns=[];connEls.clear();S.secs=0;setConn("idle");if(["home","conns"].includes(S.screen))rr();toast("Disconnected. The VPN core stopped.")});
   const core=await invoke("boot");engineBoot(core);paintScreen(S.screen);
-  try{S.cabinet=await invoke("cabinet_boot");S.signed_in=S.cabinet.signed_in;if(S.cabinet.me)applyMe(S.cabinet.me);if(S.cabinet.error)background(S.cabinet.error)}catch(error){background(error)}finally{S.restoring=false;paintScreen(S.screen)}
+  try{S.cabinet=await invoke("cabinet_boot");S.signed_in=S.cabinet.signed_in;const known=S.cabinet.me||S.signed_in&&cacheGet("/me");if(known)applyMe(known);if(S.cabinet.error)background(S.cabinet.error)}catch(error){background(error)}finally{S.restoring=false;paintScreen(S.screen)}
   if(S.signed_in&&await ensureSubscription())await loadNodes();
   document.fonts?.ready.then(markNav);setTimeout(markNav,300);
 }
