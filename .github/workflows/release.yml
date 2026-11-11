@@ -74,6 +74,10 @@ jobs:
             npx --yes @tauri-apps/cli@2.12.4 build --ci --bundles nsis --config ../no-updater.json -- --locked
           }
           if ($LASTEXITCODE -ne 0) { throw 'Installer build failed.' }
+      - name: Check installer data cleanup hooks
+        run: |
+          ./app/tests/uninstall-hook.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Installer hook checks failed.' }
       - name: Package portable app, source and checksums
         run: |
           ./app/build.ps1 -SkipBuild
