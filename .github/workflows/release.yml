@@ -102,7 +102,7 @@ jobs:
           Compress-Archive -Path "app/dist/akimov-vpn-desktop-$env:APP_VERSION/*" -DestinationPath "release/akimov-vpn-$env:APP_VERSION-windows-x64-portable.zip"
           Copy-Item -LiteralPath .tools/mihomo-v1.19.33.zip -Destination release/mihomo-v1.19.33-upstream-source.zip
           Get-ChildItem release -File | Sort-Object Name | ForEach-Object { "{0}  {1}" -f (Get-FileHash -LiteralPath $_.FullName).Hash.ToLowerInvariant(), $_.Name } | Set-Content -Encoding ascii release/SHA256SUMS.txt
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: windows-${{ env.APP_VERSION }}
           path: release/*
