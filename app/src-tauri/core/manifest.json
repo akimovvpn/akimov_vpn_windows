@@ -1,11 +1,12 @@
 {
-  "version": "v1.19.33-akimov.3",
+  "version": "v1.19.33-akimov.4",
   "upstream": "https://github.com/MetaCubeX/mihomo/tree/v1.19.33",
   "source_archive_sha256": "bb705aa873fc0e9db352fdc69b992c93fad5b310756e0e5f81194a0e0c108e21",
   "patch_sha256": "ee341e3705afa7e8b75b54482f5a3886956780b65489d85d679bcf5c398d0875",
   "url_test_patch_sha256": "252155980ac47f902b1d6785cc0edd95d750ebdc9822630add4510798dafeee7",
   "url_test_keepalive_patch_sha256": "f7302f5647a7e9969b6d38f5fee557afb3bea98b133a9f90b0271453b9c9918f",
-  "binary_sha256": "0f79a55f900bafa07da2779da6c7c509c3730bd0c886304b2b80f1d8b31d681e",
+  "url_test_recovery_patch_sha256": "c4dfaa975e31d329fdb24822eaeba7e0f86c1e88c661a4ca5fa024ed71d8cf0b",
+  "binary_sha256": "4052d75831b970777a084c47f529017152e3bde018c699c9e0f0ba466c59682e",
   "geoip_sha256": "4140529354d8048d6e85625fb78fe189f0919f4d9827b854fae6e90be1977124",
   "geosite_sha256": "aaf8ba4aeabebdffdccf2d4b4a0a4a50e62f2aaca27586c4e9f6525a878b3d9e",
   "toolchain": "go version go1.26.10 windows/amd64"

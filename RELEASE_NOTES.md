@@ -1,8 +1,8 @@
-akimov vpn 1.0.8 for Windows 10/11 x64.
+akimov vpn 1.0.9 for Windows 10/11 x64.
 
-- Opening the app shows the cabinet's loading splash: the animated а mark, акимов vpn name and soft glow on a dark background.
-- The splash appears before JavaScript starts and fades into the first ready screen. It respects reduced motion and dismisses on startup errors, with no login-form flash during saved-session restoration.
-- Includes 1.0.7's cleaner ping typography, streamed latency results and warm HTTPS keep-alive measurements.
+- Automatic groups show a working member's fresh latency when the other members or the group probe fail. A group with four hosts and one working host no longer incorrectly reports timeout.
+- The mihomo URL-test selector drops a cached dead choice when a healthy member is available for the group's configured health URL, without waiting for the ten-second selection cache. Healthy selections keep the configured tolerance.
+- Manual selectors still report failure for the chosen dead server. Groups with no working members still report failure.
 
 Choose setup.exe to install, or extract the portable ZIP with its core folder. In-app updates need the installed version. The installer is not code-signed for Windows SmartScreen; update packages are signed and verified by the app. Your other VPN is not disabled by this update.
 

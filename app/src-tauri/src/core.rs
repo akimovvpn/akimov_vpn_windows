@@ -234,7 +234,12 @@ fn enc(s: &str) -> String {
         .collect()
 }
 
-fn node_health(name: &str, all: &Value, seen: &mut std::collections::HashSet<String>) -> Value {
+fn node_health(
+    name: &str,
+    all: &Value,
+    seen: &mut std::collections::HashSet<String>,
+    measurements: Option<&HashMap<String, Value>>,
+) -> Value {
     if !seen.insert(name.to_string()) {
         return json!({"delay":null,"status":"unknown"});
     }
@@ -245,8 +250,15 @@ fn node_health(name: &str, all: &Value, seen: &mut std::collections::HashSet<Str
         .to_ascii_lowercase()
         .replace('-', "");
     let selected = p["now"].as_str();
-    let mut result = if let Some(now) = selected {
-        node_health(now, all, seen)
+    let measured = measurements.and_then(|values| values.get(name));
+    let mut result = if let Some(health) = measured.filter(|health| health["status"] == "ok") {
+        health.clone()
+    } else if let Some(now) = selected {
+        node_health(now, all, seen, measurements)
+    } else if measurements.is_some() {
+        measured
+            .cloned()
+            .unwrap_or_else(|| json!({"delay":null,"status":"unknown"}))
     } else {
         match p["history"]
             .as_array()
@@ -264,7 +276,7 @@ fn node_health(name: &str, all: &Value, seen: &mut std::collections::HashSet<Str
             .into_iter()
             .flatten()
             .filter_map(Value::as_str)
-            .map(|n| (n, node_health(n, all, seen)))
+            .map(|n| (n, node_health(n, all, seen, measurements)))
             .collect();
         if let Some((now, health)) = children
             .iter()
@@ -279,7 +291,12 @@ fn node_health(name: &str, all: &Value, seen: &mut std::collections::HashSet<Str
             result = json!({"delay":null,"status":"unknown"});
         }
     }
-    if result.get("now").is_none() {
+    if result["status"] != "ok" {
+        if let Some(health) = measured {
+            result = health.clone();
+        }
+    }
+    if result.get("now").is_none() && !measured.is_some_and(|health| health["status"] == "ok") {
         if let Some(now) = selected {
             result["now"] = json!(now);
         }
@@ -297,7 +314,7 @@ fn proxy_snapshot(v: &Value, main: &str) -> Value {
         .flatten()
         .filter_map(Value::as_str)
         .map(|name| {
-            let mut health = node_health(name, all, &mut std::collections::HashSet::new());
+            let mut health = node_health(name, all, &mut std::collections::HashSet::new(), None);
             health["name"] = json!(name);
             health["type"] = all[name]["type"].clone();
             health
@@ -314,6 +331,9 @@ fn apply_url_measurements(snapshot: &mut Value, measurements: Option<&HashMap<St
             node["delay"] = measured.map_or(Value::Null, |value| value["delay"].clone());
             node["status"] = measured.map_or(json!("unknown"), |value| value["status"].clone());
             node["url"] = measured.map_or(Value::Null, |value| value["url"].clone());
+            if let Some(now) = measured.and_then(|value| value.get("now")) {
+                node["now"] = now.clone();
+            }
         }
     }
 }
@@ -1176,18 +1196,24 @@ impl Engine {
                         let Some(name) = targets.get(next.fetch_add(1, SeqCst)) else {
                             break;
                         };
-                        let mut measured = self.measure_proxy(ctl, secret, name);
+                        let measured = self.measure_proxy(ctl, secret, name);
                         if self.closing.load(SeqCst)
                             || self.gen.load(SeqCst) != generation
                             || self.profile_revision.load(SeqCst) != revision
                         {
                             break;
                         }
+                        let mut saved = results.lock().unwrap();
+                        saved.insert(name.clone(), measured);
+                        let mut measured = node_health(
+                            name,
+                            all,
+                            &mut std::collections::HashSet::new(),
+                            Some(&saved),
+                        );
                         measured["name"] = json!(name);
-                        results
-                            .lock()
-                            .unwrap()
-                            .insert(name.clone(), measured.clone());
+                        saved.insert(name.clone(), measured.clone());
+                        drop(saved);
                         progress(measured);
                     });
                 }
@@ -1336,6 +1362,87 @@ mod tests {
         assert_eq!(
             cached_proxy_snapshot(sub, &[], "Removed").unwrap()["now"],
             "First"
+        );
+    }
+    #[test]
+    fn successful_group_probe_keeps_the_refreshed_core_selection() {
+        let all = json!({"Estonia":{"type":"URLTest","now":"LTE 1","all":["LTE 1","LTE 4"]}});
+        let mut measured = HashMap::from([(
+            "Estonia".to_string(),
+            json!({"delay":39,"status":"ok","url":"https://cp.cloudflare.com/generate_204"}),
+        )]);
+        let health = node_health(
+            "Estonia",
+            &all,
+            &mut std::collections::HashSet::new(),
+            Some(&measured),
+        );
+        assert!(
+            health.get("now").is_none(),
+            "a direct probe does not identify which member the core chose"
+        );
+        measured.insert("Estonia".into(), health);
+        let mut refreshed = json!({"nodes":[{"name":"Estonia","now":"LTE 4"}]});
+        apply_url_measurements(&mut refreshed, Some(&measured));
+        assert_eq!(refreshed["nodes"][0]["now"], "LTE 4");
+        assert_eq!(refreshed["nodes"][0]["delay"], 39);
+    }
+    #[test]
+    fn automatic_group_keeps_the_only_fresh_working_member_when_its_probe_fails() {
+        let all = json!({
+            "Estonia":{"type":"URLTest","now":"LTE 1","all":["LTE 1","LTE 2","LTE 3","LTE 4"],"testUrl":"https://speed.cloudflare.com/__down?bytes=50000"},
+            "LTE 1":{"type":"Vless","history":[{"delay":0}]},
+            "LTE 2":{"type":"Vless","history":[{"delay":0}]},
+            "LTE 3":{"type":"Vless","history":[{"delay":0}]},
+            "LTE 4":{"type":"Vless","history":[{"delay":0}]}
+        });
+        let mut measured = HashMap::new();
+        for name in ["Estonia", "LTE 1", "LTE 2", "LTE 3"] {
+            measured.insert(
+                name.to_string(),
+                json!({"delay":null,"status":"failed","url":null}),
+            );
+        }
+        measured.insert(
+            "LTE 4".into(),
+            json!({"delay":42,"status":"ok","url":"https://cp.cloudflare.com/generate_204"}),
+        );
+        let health = node_health(
+            "Estonia",
+            &all,
+            &mut std::collections::HashSet::new(),
+            Some(&measured),
+        );
+        assert_eq!(health["status"], "ok");
+        assert_eq!(health["delay"], 42);
+        assert_eq!(health["now"], "LTE 4");
+        assert_eq!(health["url"], "https://cp.cloudflare.com/generate_204");
+        measured.insert("Estonia".into(), health);
+        let mut snapshot = json!({"nodes":[{"name":"Estonia","now":"LTE 1"}]});
+        apply_url_measurements(&mut snapshot, Some(&measured));
+        assert_eq!(snapshot["nodes"][0]["now"], "LTE 4");
+        assert_eq!(snapshot["nodes"][0]["delay"], 42);
+        let mut selector = all.clone();
+        selector["Estonia"]["type"] = json!("Selector");
+        measured.insert("Estonia".into(), json!({"delay":null,"status":"failed"}));
+        assert_eq!(
+            node_health(
+                "Estonia",
+                &selector,
+                &mut std::collections::HashSet::new(),
+                Some(&measured)
+            )["status"],
+            "failed"
+        );
+        measured.insert("LTE 4".into(), json!({"delay":null,"status":"failed"}));
+        assert_eq!(
+            node_health(
+                "Estonia",
+                &all,
+                &mut std::collections::HashSet::new(),
+                Some(&measured)
+            )["status"],
+            "failed"
         );
     }
     #[test]

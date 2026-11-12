@@ -1,0 +1,74 @@
+--- a/adapter/outboundgroup/urltest.go
++++ b/adapter/outboundgroup/urltest.go
+@@ -101,7 +101,7 @@
+ }
+ 
+ func (u *URLTest) fast(touch bool) C.Proxy {
+-	elm, _, shared := u.fastSingle.Do(func() (C.Proxy, error) {
++	choose := func() (C.Proxy, error) {
+ 		proxies := u.GetProxies(touch)
+ 		if u.selected != "" {
+ 			for _, proxy := range proxies {
+@@ -140,7 +140,12 @@
+ 			u.fastNode = fast
+ 		}
+ 		return u.fastNode, nil
+-	})
++	}
++	elm, _, shared := u.fastSingle.Do(choose)
++	if shared && !elm.AliveForTestUrl(u.testUrl) {
++		u.fastSingle.Reset()
++		elm, _, shared = u.fastSingle.Do(choose)
++	}
+ 	if shared && touch { // a shared fastSingle.Do() may cause providers untouched, so we touch them again
+ 		u.Touch()
+ 	}
+--- /dev/null
++++ b/adapter/outboundgroup/urltest_recovery_akimov_test.go
+@@ -0,0 +1,46 @@
++package outboundgroup
++
++import (
++	"fmt"
++	"testing"
++
++	C "github.com/metacubex/mihomo/constant"
++)
++
++type recoveryProxy struct {
++	C.Proxy
++	name  string
++	alive bool
++}
++
++func (p *recoveryProxy) Name() string                { return p.name }
++func (p *recoveryProxy) AliveForTestUrl(string) bool { return p.alive }
++func (p *recoveryProxy) LastDelayForTestUrl(string) uint16 {
++	if p.alive {
++		return 42
++	}
++	return 0xffff
++}
++
++func TestURLTestRecoversCachedDeadMember(t *testing.T) {
++	for live := 0; live < 4; live++ {
++		t.Run(fmt.Sprint(live), func(t *testing.T) {
++			members := make([]C.Proxy, 4)
++			for i := range members {
++				members[i] = &recoveryProxy{name: fmt.Sprintf("Estonia LTE %d", i+1)}
++			}
++			group, err := NewURLTest(GroupCommonOption{Name: "Estonia LTE auto", URL: "https://speed.cloudflare.com/__down?bytes=50000"}, URLTestOption{Tolerance: 150}, members[0], nil)
++			if err != nil {
++				t.Fatal(err)
++			}
++			group.providerProxies = members
++			group.Now() // Cache a dead choice before the health checks finish.
++			members[live].(*recoveryProxy).alive = true
++			if got := group.Now(); got != members[live].Name() {
++				t.Fatalf("one of four members works; selected %q instead of %q", got, members[live].Name())
++			}
++			members[live].(*recoveryProxy).alive = false
++			group.Now() // All dead must still return without recursion looping.
++		})
++	}
++}

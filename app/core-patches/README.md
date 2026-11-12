@@ -1,6 +1,6 @@
 # Bundled mihomo changes
 
-This package uses mihomo v1.19.33 with `reality-client.patch`, `url-test-status.patch` and `url-test-keepalive.patch`, built with Go 1.26.10 and `with_gvisor`. The manifest records the source archive, patch and binary hashes. Rebuild with `./build-core.ps1`; Go and Git are required. Then build the Windows app with `./build.ps1`.
+This package uses mihomo v1.19.33 with `reality-client.patch`, `url-test-status.patch`, `url-test-keepalive.patch` and `url-test-recovery.patch`, built with Go 1.26.10 and `with_gvisor`. The manifest records the source archive, patch and binary hashes. Rebuild with `./build-core.ps1`; Go and Git are required. Then build the Windows app with `./build.ps1`.
 
 Modern REALITY servers require X25519MLKEM768. Upstream mihomo disables it by default, and its older Firefox fingerprint does not contain the hybrid share. The patch defaults to hybrid REALITY and uses the Chrome fingerprint when the requested fingerprint cannot supply that share. Explicit `support-x25519mlkem768: false` retains the legacy handshake. Certificate and REALITY authentication checks remain enabled.
 
@@ -13,5 +13,7 @@ References: [REALITY hybrid requirement](https://github.com/XTLS/REALITY/commit/
 The URL-test status patch rejects responses outside the requested expected HTTP status instead of returning a positive delay for a blocked page. The local Go test checks HTTP 204 success and HTTP 200/403/302 failures. The app tests each unique server through HTTPS, retries a second public 204 endpoint on failure, and keeps those measured results separate from background health histories. Each endpoint has a two-second budget; results stream to the picker as workers finish.
 
 The app enables `unified-delay`: the first request warms the proxy/TLS connection, and the second request on that connection supplies the displayed time. The keep-alive patch rejects a closed connection or failed second request instead of silently reporting the cold request's handshake time. A local HTTPS test verifies two requests share one TLS connection, warm-up time is excluded, and `Connection: close` fails. Connections are closed after each probe; testing does not leave idle tunnels running.
+
+The URL-test recovery patch rechecks a cached selection if that member is dead for the group's configured health URL, allowing an already healthy member to take over without waiting for the ten-second selection cache. Healthy selections retain the existing tolerance behavior. The Go regression covers each of four hosts being the only survivor and all hosts failing. The app resolves automatic-group latency from fresh member measurements when a group probe fails, keeping the working member's delay, endpoint and name in the cache and streamed result. Manual selectors retain their chosen member's failure.
 
 The upstream source and these patches are GPL-3.0; see the bundled mihomo license.
