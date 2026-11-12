@@ -95,6 +95,85 @@ fn cabinet_login(
     forgotten?;
     Ok(result)
 }
+/// Runs inside Telegram's page, in a window that cannot call any app command. Telegram's page
+/// answers the page that opened it; here that answer is carried out as a navigation the app stops.
+const TELEGRAM_BRIDGE: &str = r#"(function(){
+  if(location.hostname!=="oauth.telegram.org")return;
+  var sent=false;
+  function done(data){
+    if(sent)return;sent=true;
+    location.href="https://akimov-login.invalid/?"+(data===undefined?"closed":"d="+encodeURIComponent(typeof data==="string"?data:JSON.stringify(data)));
+  }
+  var opener={closed:false,focus:function(){},postMessage:function(data){done(data)}};
+  try{Object.defineProperty(window,"opener",{configurable:true,get:function(){return opener},set:function(){}})}catch(e){}
+  window.close=function(){done()};
+})();"#;
+
+/// Telegram's official sign-in, the same one the cabinet uses, in its own window.
+/// Returns the account, or null when the window was closed without signing in.
+#[tauri::command(async)]
+fn cabinet_telegram_login(
+    app: tauri::AppHandle,
+    c: Cab,
+    e: Eng,
+    gate: Gate,
+) -> Result<Value, String> {
+    const REFUSED: &str = "Telegram sign-in was not completed. Try again.";
+    c.set_proxy(e.proxy_port());
+    let challenge = c.telegram_challenge()?;
+    if let Some(old) = app.get_webview_window("telegram") {
+        let _ = old.destroy();
+    }
+    let (done, answers) = std::sync::mpsc::channel::<Option<String>>();
+    let closed = done.clone();
+    let window = tauri::WebviewWindowBuilder::new(
+        &app,
+        "telegram",
+        tauri::WebviewUrl::External(challenge.url),
+    )
+    .title("Sign in with Telegram")
+    .inner_size(520.0, 720.0)
+    .center()
+    .initialization_script(TELEGRAM_BRIDGE)
+    .on_navigation(move |url| {
+        if url.host_str() == Some("akimov-login.invalid") {
+            let answer = url.query_pairs().find(|(key, _)| key == "d");
+            let _ = done.send(answer.map(|(_, value)| value.into_owned()));
+            return false;
+        }
+        // The window stays on Telegram's own pages.
+        url.scheme() == "https"
+            && url
+                .host_str()
+                .is_some_and(|host| host == "telegram.org" || host.ends_with(".telegram.org"))
+    })
+    .build()
+    .map_err(|_| "Could not open the Telegram sign-in window.")?;
+    window.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Destroyed) {
+            let _ = closed.send(None);
+        }
+    });
+    let answer = answers
+        .recv_timeout(std::time::Duration::from_secs(challenge.expires))
+        .ok()
+        .flatten();
+    let _ = window.destroy();
+    let Some(answer) = answer else {
+        return Ok(Value::Null);
+    };
+    let message: Value = serde_json::from_str(&answer).map_err(|_| REFUSED)?;
+    if message["event"] != "auth_result" || !message["error"].is_null() {
+        return Err(REFUSED.into());
+    }
+    let _guard = gate.0.lock().map_err(|_| "Account operation failed.")?;
+    let me = c.telegram_complete(&challenge.token, &message["result"])?;
+    let stopped = e.disconnect();
+    let forgotten = e.forget_subscription();
+    stopped?;
+    forgotten?;
+    Ok(me)
+}
 #[tauri::command(async)]
 fn cabinet_request(
     c: Cab,
@@ -356,6 +435,7 @@ fn main() {
             boot,
             cabinet_boot,
             cabinet_login,
+            cabinet_telegram_login,
             cabinet_auth,
             cabinet_request,
             cabinet_logout,

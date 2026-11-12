@@ -576,6 +576,7 @@ S.update={state:"idle",version:""};S.from={};
 const updateRow=()=>{const u=S.update,busy=u.state==="checking"||u.state==="installing";return `<div class="set"><div class="grow"><div class="set-t">${u.state==="available"||u.state==="installing"?"Version "+esc(u.version)+" is available":"App update"}</div><div class="cap dim">${{idle:"Signed releases are checked automatically.",checking:"Checking…",none:"You have the latest version.",available:"Installing disconnects the VPN and restarts the app.",installing:"Downloading and verifying…",error:"Could not check right now."}[u.state]}</div></div><button class="btn sm ${u.state==="available"?"primary":""}" data-act="${u.state==="available"?"update-install":"update-check"}" ${busy?"disabled":""}>${u.state==="available"?"Install":"Check"}</button></div>`};
 function friendlyError(error){
  if(/device identification/i.test(String(error?.message||error)))return "Device identification is unavailable. Restart Windows and try again.";
+ if(/^Telegram sign-in|Telegram sign-in window/.test(String(error?.message||error)))return String(error?.message||error);
  const text=String(error?.message||error||'');
  if(/wrong.*(email|password)|incorrect.*(email|password)|invalid credentials|неверн.*парол/i.test(text))return 'Wrong email or password.';
  if(/sign in again|session expired|HTTP 401|not signed in/i.test(text))return 'Please sign in again.';
@@ -623,7 +624,7 @@ async function loadLegal(force=false){
   try{
     const result=await api("GET","/legal");
     if(!Array.isArray(result.docs)||result.docs.length>32)throw Error("invalid documents");
-    const docs=result.docs.map(doc=>{const url=new URL(doc.url);if(url.protocol!=="https:"||url.username||url.password||typeof doc.title!=="string"||doc.title.length>300)throw Error("invalid document");return{key:String(doc.key||""),title:doc.title,url:url.href}});
+    const docs=result.docs.filter(doc=>doc.url).map(doc=>{const url=new URL(doc.url);if(url.protocol!=="https:"||url.username||url.password||typeof doc.title!=="string"||doc.title.length>300)throw Error("invalid document");return{key:String(doc.key||""),title:doc.title,url:url.href}});
     S.legal={docs,version:String(result.version||"").slice(0,128)};
     for(const link of $$('[data-act="legal-link"]')){const doc=docs.find(d=>d.key===link.dataset.key);if(doc)link.setAttribute("href",doc.url)}
   }catch(error){S.legalError=friendlyError(error)}finally{S.legalLoading=false;if(S.sheet==="legal")renderSheet();paintScreen("settings")}
@@ -715,7 +716,7 @@ function signInScreen(){
  if(mode==='register')fields+=`<label class="consent"><input type="checkbox" id="terms" required><span>I accept the ${legalLink('offer','public offer')} and ${legalLink('terms','terms of service')}.</span></label><label class="consent"><input type="checkbox" id="personal-data" required><span>I consent to ${legalLink('consent','processing of my personal data')} and have read the ${legalLink('privacy','privacy policy')}.</span></label>`;
  const button={login:'Sign in',register:'Create account',verify:'Verify email',forgot:'Send reset link',reset:'Save password'}[mode];
  const switcher=mode==='login'?'New here? <a class="auth-link accent" href="#" data-act="auth" data-v="register">Create account</a>':mode==='register'?'Already have an account? <a class="auth-link accent" href="#" data-act="auth" data-v="login">Sign in</a>':'<a class="auth-link" href="#" data-act="auth" data-v="login">Back to sign in</a>';
- return `<section class="auth-wrap"><form id="${mode}" class="card pad auth"><h1 class="auth-title">${title}</h1>${fields}<button class="btn primary block" style="margin-top:20px" type="submit" ${S.authBusy?'disabled':''}>${button}</button><div class="auth-switch">${switcher}${mode==='verify'?` · <button class="auth-link" type="button" data-act="auth-resend" ${Date.now()<S.auth.retryAt?'disabled':''}>Resend code</button>`:''}</div></form></section>`;
+ return `<section class="auth-wrap"><form id="${mode}" class="card pad auth"><h1 class="auth-title">${title}</h1>${fields}<button class="btn primary block" style="margin-top:20px" type="submit" ${S.authBusy?'disabled':''}>${button}</button>${mode==='login'||mode==='register'?`<button class="btn block" style="margin-top:10px" type="button" data-act="auth-telegram" ${S.authBusy?'disabled':''}>Continue with Telegram</button>`:''}<div class="auth-switch">${switcher}${mode==='verify'?` · <button class="auth-link" type="button" data-act="auth-resend" ${Date.now()<S.auth.retryAt?'disabled':''}>Resend code</button>`:''}</div></form></section>`;
 }
 
 act['subscription-refresh']=async()=>{if(S.refreshing||S.testing||!S.has_sub)return;S.refreshing=true;if(S.sheet==="nodes")renderSheet();if(S.screen==='settings'||S.screen==='subs')rr();try{engineBoot(await invoke('refresh_subscription'));await loadNodes();toast('Subscription updated.')}catch(error){report(error)}finally{S.refreshing=false;if(S.sheet==="nodes")renderSheet();if(S.screen==='settings'||S.screen==='subs')rr()}};
@@ -863,6 +864,9 @@ Object.assign(act,{
   }
 });
 let resendTimer=0;
+async function signedIn(me){engineBoot(await invoke('boot'));applyMe(me);S.auth.mode='login';go('home');paintScreen('home');if(await ensureSubscription())await loadNodes()}
+/* Telegram's own page opens in a separate window; a closed window answers null and changes nothing */
+act['auth-telegram']=async()=>{if(S.authBusy)return;S.authBusy=true;rr();try{const me=await invoke('cabinet_telegram_login');if(me)await signedIn(me)}catch(error){report(error)}finally{S.authBusy=false;if(!S.signed_in)rr()}};
 act.auth=el=>{if(S.authBusy)return;clearTimeout(navT);pendingPaint=null;const input=$('#email');if(input)S.auth.email=input.value.trim();S.auth.mode=el.dataset.v;rr()};
 act['auth-resend']=async()=>{if(S.authBusy||Date.now()<S.auth.retryAt)return;S.authBusy=true;try{await invoke('cabinet_auth',{action:'resend',body:{email:S.auth.email}});S.auth.retryAt=Date.now()+60000;toast('A new code has been sent.');clearTimeout(resendTimer);resendTimer=setTimeout(()=>{if(!S.signed_in&&S.auth.mode==='verify')rr()},60000)}catch(error){report(error)}finally{S.authBusy=false;rr()}};
 document.addEventListener('submit',async event=>{
@@ -878,7 +882,7 @@ document.addEventListener('submit',async event=>{
   if(form.id==='login'){result={me:await invoke('cabinet_login',{email,password})}}
   else{let body={email};if(form.id==='register')body={email,password,accept_terms:$('#terms').checked,accept_personal_data:$('#personal-data').checked};if(form.id==='verify')body={email:S.auth.email,code:$('#code').value.trim()};if(form.id==='reset'){let token=$('#reset-link').value.trim();if(/^https?:\/\//i.test(token)){const link=new URL(token);if(link.origin!==new URL(S.cabinet.cabinet_url).origin)throw Error('invalid reset link');token=link.searchParams.get('token')||''}body={token,password}}result=await invoke('cabinet_auth',{action:form.id,body})}
   S.auth.email=email;
-  if(result.me){engineBoot(await invoke('boot'));applyMe(result.me);S.auth.mode='login';go('home');paintScreen('home');if(await ensureSubscription())await loadNodes()}
+  if(result.me)await signedIn(result.me)
   else if(form.id==='register'){S.auth.mode='verify';S.auth.email=result.email||email;toast('Check your email for a verification code.');rr()}
   else if(form.id==='forgot'){S.auth.mode='reset';rr()}
  }catch(error){report(error)}finally{S.authBusy=false;if(button.isConnected){button.disabled=false;button.classList.remove('loading')}const current=$('form.auth button[type="submit"]');if(current)current.disabled=false}
@@ -898,7 +902,8 @@ async function boot(){
   await window.__TAURI__.event.listen("tray-toggle",()=>{toggle().catch(report)});
   await window.__TAURI__.event.listen("dropped",()=>{S.conns=[];connEls.clear();S.secs=0;setConn("idle");if(["home","conns"].includes(S.screen))rr();toast("Disconnected. The VPN core stopped.")});
   const core=await invoke("boot");engineBoot(core);paintScreen(S.screen);
-  try{S.cabinet=await invoke("cabinet_boot");S.signed_in=S.cabinet.signed_in;const known=S.cabinet.me||S.signed_in&&cacheGet("/me");if(known)applyMe(known);if(S.cabinet.error)background(S.cabinet.error)}catch(error){background(error)}finally{S.restoring=false;paintScreen(S.screen)}
+  try{S.cabinet=await invoke("cabinet_boot");S.signed_in=S.cabinet.signed_in;const known=S.cabinet.me||S.signed_in&&cacheGet("/me");if(known)applyMe(known);if(!S.signed_in)cacheClear();if(S.cabinet.error)background(S.cabinet.error)}catch(error){background(error)}finally{S.restoring=false;paintScreen(S.screen)}
+  if(S.signed_in&&!S.cabinet.me)void refreshScreen(S.screen).catch(background);
   if(S.signed_in&&await ensureSubscription())await loadNodes();
   document.fonts?.ready.then(markNav);setTimeout(markNav,300);
 }

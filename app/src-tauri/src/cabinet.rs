@@ -21,8 +21,8 @@ struct Saved {
 impl Default for Saved {
     fn default() -> Self {
         Self {
-            base_url: "https://api.rustafield.site/api/v1".into(),
-            cabinet_url: "https://cabinet.rustafield.site".into(),
+            base_url: "https://api.akimov.bid/api/v1".into(),
+            cabinet_url: "https://akimov.bid".into(),
             protected_refresh: Vec::new(),
         }
     }
@@ -47,6 +47,8 @@ pub struct Cabinet {
     agent: Result<ureq::Agent, String>,
     // Local port of the running VPN core, 0 when it is not running. Used only as a fallback route.
     proxy: std::sync::atomic::AtomicU16,
+    // The direct route failed and the VPN route worked: skip the direct attempt while the VPN is up.
+    via_vpn: std::sync::atomic::AtomicBool,
     // Holding this lock through HTTP also serializes refresh and account changes.
     state: Mutex<State>,
 }
@@ -68,7 +70,7 @@ fn build_agent(proxy_port: u16) -> Result<ureq::Agent, String> {
         .tls_connector(Arc::new(tls))
         .redirects(0) // Never forward credentials to a redirect destination.
         .max_idle_connections(0) // Avoid ureq's automatic retries of stale pooled connections.
-        .timeout_connect(Duration::from_secs(10))
+        .timeout_connect(Duration::from_secs(6))
         .timeout(Duration::from_secs(25));
     if proxy_port != 0 {
         let proxy = ureq::Proxy::new(format!("http://127.0.0.1:{proxy_port}"))
@@ -95,7 +97,8 @@ impl Cabinet {
                 serde_json::from_slice(&bytes).map_err(|_| "Cabinet preferences are invalid.")?;
             let fixed = Saved::default();
             if saved.base_url != fixed.base_url || saved.cabinet_url != fixed.cabinet_url {
-                return Err("The account service cannot be changed.".into());
+                // Saved for an earlier account service: its session means nothing here. Start signed out.
+                return Ok((fixed, String::new()));
             }
             if !saved.base_url.is_empty() {
                 if origin(&saved.base_url, true)? != saved.base_url
@@ -132,6 +135,7 @@ impl Cabinet {
             dir,
             agent,
             proxy: std::sync::atomic::AtomicU16::new(0),
+            via_vpn: std::sync::atomic::AtomicBool::new(false),
             state: Mutex::new(State {
                 saved,
                 access: String::new(),
@@ -154,27 +158,108 @@ impl Cabinet {
         Ok(())
     }
 
+    /// Answers from what is saved on this computer, without the network: an unreachable
+    /// account service must not hold the window on its startup screen.
     pub fn boot(&self) -> Result<Value, String> {
-        let mut state = self.lock()?;
-        let mut me = None;
-        let mut error = state.load_error.clone();
-        if !state.refresh.is_empty() {
-            match self.authenticated(&mut state, "GET", "/me", None) {
-                Ok(user) => match validate_me(&user) {
-                    Ok(()) => me = Some(user),
-                    Err(message) => error = Some(message),
-                },
-                Err(message) => error = Some(message),
-            }
-        }
+        let state = self.lock()?;
         Ok(json!({
             "configured": !state.saved.base_url.is_empty(),
             "signed_in": !state.refresh.is_empty(),
             "base_url": state.saved.base_url,
             "cabinet_url": state.saved.cabinet_url,
-            "me": me,
-            "error": error,
+            "error": state.load_error,
         }))
+    }
+
+    /// Starts Telegram's official sign-in: the cabinet issues a one-time challenge and names the bot.
+    pub fn telegram_challenge(&self) -> Result<TelegramChallenge, String> {
+        const UNAVAILABLE: &str = "Telegram sign-in is unavailable right now.";
+        let state = self.lock()?;
+        let value = self
+            .http(
+                &state.saved.base_url,
+                "POST",
+                "/auth/telegram/oidc/request",
+                None,
+                None,
+            )
+            .map_err(|e| {
+                if e.status == 0 {
+                    e.message
+                } else {
+                    UNAVAILABLE.into()
+                }
+            })?;
+        let text = |key: &str| match &value[key] {
+            Value::String(s) => s.clone(),
+            Value::Number(n) => n.to_string(),
+            _ => String::new(),
+        };
+        let (token, client, nonce) = (text("token"), text("client_id"), text("nonce"));
+        if !valid_token(&token)
+            || !valid_token(&nonce)
+            || client.is_empty()
+            || !client.bytes().all(|b| b.is_ascii_digit())
+        {
+            return Err(UNAVAILABLE.into());
+        }
+        // The same request the cabinet page makes; Telegram accepts it only for the bot's own site.
+        let site = &state.saved.cabinet_url;
+        let mut url = Url::parse("https://oauth.telegram.org/auth").map_err(|_| UNAVAILABLE)?;
+        url.query_pairs_mut()
+            .append_pair("response_type", "post_message")
+            .append_pair("client_id", &client)
+            .append_pair("redirect_uri", &format!("{site}/"))
+            .append_pair("origin", site)
+            .append_pair("scope", "openid profile")
+            .append_pair("nonce", &nonce)
+            .append_pair("lang", "en");
+        Ok(TelegramChallenge {
+            token,
+            url,
+            expires: value["expires_in"].as_u64().unwrap_or(300).clamp(30, 600),
+        })
+    }
+
+    /// `answer` is what Telegram's page hands back: an ID token, or the classic widget fields.
+    /// Nothing in it is trusted here; the cabinet verifies it against the challenge.
+    pub fn telegram_complete(&self, token: &str, answer: &Value) -> Result<Value, String> {
+        const REFUSED: &str = "Telegram sign-in was not completed. Try again.";
+        let id_token = answer.as_str().or_else(|| answer["id_token"].as_str());
+        let body = match (id_token, answer.as_object()) {
+            (Some(id), _) if valid_token(id) => json!({"token": token, "id_token": id}),
+            (None, Some(fields)) if fields.contains_key("hash") && fields.len() <= 16 => {
+                json!({"token": token, "widget": fields})
+            }
+            _ => return Err(REFUSED.into()),
+        };
+        let mut state = self.lock()?;
+        let tokens = self
+            .http(
+                &state.saved.base_url,
+                "POST",
+                "/auth/telegram/oidc/complete",
+                None,
+                Some(&body),
+            )
+            .map_err(|e| match e.status {
+                0 | 403 | 429 => e.message,
+                _ => REFUSED.into(),
+            })?;
+        let tokens = parse_tokens(tokens)?;
+        // Verify the account before replacing any existing session.
+        let me = self
+            .http(
+                &state.saved.base_url,
+                "GET",
+                "/me",
+                Some(&tokens.access_token),
+                None,
+            )
+            .map_err(|e| e.message)?;
+        validate_me(&me)?;
+        self.set_tokens(&mut state, tokens)?;
+        Ok(me)
     }
 
     pub fn login(&self, email: &str, password: &str) -> Result<Value, String> {
@@ -423,13 +508,24 @@ impl Cabinet {
         token: Option<&str>,
         body: Option<&Value>,
     ) -> Result<Value, HttpError> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let unsent = |e: &HttpError| e.message == EDGE_BLOCKED || e.message == UNSENT;
         let agent = self.agent.as_ref().map_err(|e| HttpError::local(e))?;
-        let direct = self.http_via(agent, base, method, path, token, body);
-        let port = self.proxy.load(std::sync::atomic::Ordering::Relaxed);
+        let port = self.proxy.load(Relaxed);
+        let vpn_first = port != 0 && self.via_vpn.load(Relaxed);
+        let direct = if vpn_first {
+            Err(HttpError::local(UNSENT))
+        } else {
+            self.http_via(agent, base, method, path, token, body)
+        };
         let result = match direct {
-            Err(e) if port != 0 && (e.message == EDGE_BLOCKED || e.message == UNSENT) => {
+            Err(e) if port != 0 && unsent(&e) => {
                 let via_vpn = build_agent(port).map_err(|e| HttpError::local(&e))?;
-                self.http_via(&via_vpn, base, method, path, token, body)
+                let answer = self.http_via(&via_vpn, base, method, path, token, body);
+                // A direct attempt costs a full connect timeout; remember which route answers.
+                self.via_vpn
+                    .store(!matches!(&answer, Err(e) if unsent(e)), Relaxed);
+                answer
             }
             other => other,
         };
@@ -510,6 +606,12 @@ impl Cabinet {
         }
         Ok(value)
     }
+}
+
+pub struct TelegramChallenge {
+    pub token: String,
+    pub url: Url,
+    pub expires: u64,
 }
 
 struct HttpError {
@@ -799,6 +901,50 @@ fn protect(_: &[u8], _: bool) -> Result<Vec<u8>, String> {
 mod tests {
     use super::*;
 
+    fn scratch(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("akimov-cabinet-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_session_saved_for_another_service_starts_signed_out_without_an_error() {
+        let dir = scratch("moved");
+        fs::write(
+            dir.join("cabinet.json"),
+            r#"{"base_url":"https://api.example.com/api/v1","cabinet_url":"https://cabinet.example.com","protected_refresh":[1,2,3]}"#,
+        )
+        .unwrap();
+        let boot = Cabinet::new(dir.clone()).boot().unwrap();
+        assert_eq!(boot["signed_in"], false);
+        assert!(boot["error"].is_null());
+        assert_eq!(boot["base_url"], Saved::default().base_url);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn telegram_answers_that_are_not_a_token_or_widget_fields_never_reach_the_cabinet() {
+        let dir = scratch("telegram");
+        let cabinet = Cabinet::new(dir.clone());
+        for junk in [
+            json!(null),
+            json!(42),
+            json!(""),
+            json!("has spaces"),
+            json!({"id": 1}),
+            json!({"id_token": "bad token"}),
+        ] {
+            let error = cabinet.telegram_complete("challenge", &junk).unwrap_err();
+            assert!(
+                error.starts_with("Telegram sign-in was not completed"),
+                "{junk}"
+            );
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn only_the_edge_refusal_counts_as_blocked() {
         assert!(edge_blocked(
@@ -984,7 +1130,9 @@ mod tests {
             locked.lock().unwrap().saved.base_url,
             Saved::default().base_url
         );
-        assert!(locked.lock().unwrap().load_error.is_some());
+        // A file saved for another account service starts clean rather than failing.
+        assert!(locked.lock().unwrap().load_error.is_none());
+        assert!(locked.lock().unwrap().refresh.is_empty());
         fs::remove_file(dir.join("cabinet.json")).unwrap();
         fs::remove_dir(dir).unwrap();
     }

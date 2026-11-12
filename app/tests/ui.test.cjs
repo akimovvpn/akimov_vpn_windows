@@ -17,13 +17,14 @@ const me = {id:1,email:'fixture@example.invalid',balance:100000,discount:{percen
   {id:77,plan:'Fixture <plan>',tariff_id:2,status:'active',days_left:30,term_days:90,expires_at:'2027-01-01T00:00:00Z',traffic_gb:500,used_gb:125,devices:5,plan_devices:5,plan_traffic_gb:500,extra_device_price_kopecks:1500,extra_gb_price_kopecks:5000,addon_months_remaining:2,renew_price_per_30_kopecks:25001},
   {id:78,plan:'Second',tariff_id:2,status:'active',days_left:60,term_days:90,expires_at:'2027-02-01T00:00:00Z',traffic_gb:100,used_gb:0,devices:3}
 ]};
-let offline=false,deleteWait=null,buyTerminal=false,buyWait=null,connectWait=null,connectError=null,buyFails=1,promoFails=false,core={has_sub:true,connected:false,rules:[],mode:'tun',node:'Fixture <server>',hwid:'own/hwid',sub_id:77,version:'0.1.0'};
+let offline=false,telegramAnswers=false,deleteWait=null,buyTerminal=false,buyWait=null,connectWait=null,connectError=null,buyFails=1,promoFails=false,core={has_sub:true,connected:false,rules:[],mode:'tun',node:'Fixture <server>',hwid:'own/hwid',sub_id:77,version:'0.1.0'};
 const document={hidden:false,documentElement:element(),activeElement:element(),fonts:{ready:Promise.resolve()},querySelector:query,querySelectorAll:()=>[],createElement:element,addEventListener:(name,fn)=>(handlers[name]??=[]).push(fn)};
 const context = vm.createContext({document,window:{__TAURI__:{event:{listen:async(name,fn)=>events[name]=fn},core:{invoke:async(name,args)=>{
   calls.push([name,args]);
   if(name==='boot')return {...core};
   if(name==='cabinet_boot')return {configured:true,signed_in:true,base_url:'https://example.invalid/api/v1',cabinet_url:'https://example.invalid',me:structuredClone(me)};
   if(name==='cabinet_login'){core.has_sub=false;core.sub_id=null;return structuredClone(me);}
+  if(name==='cabinet_telegram_login'){if(!telegramAnswers)return null;core.has_sub=false;core.sub_id=null;return structuredClone(me);}
   if(name==='cabinet_auth'){if(args.action==='register')return {status:'verification_required',email:args.body.email};if(args.action==='verify'||args.action==='reset')return {status:'signed_in',me:structuredClone(me)};return {status:'reset_sent'}}
   if(name==='refresh_subscription')return {...core,profile:{title:'Fixture profile',total:0,upload:12,download:34,updated_at:1,update_hours:1}};
   if(name==='connect'){if(connectWait)return await connectWait;if(connectError)throw connectError;core.connected=true;return {ms:300}}
@@ -219,6 +220,11 @@ const flush = () => new Promise(resolve=>setImmediate(resolve));
   run('NODES.push({id:"<node>",name:"<node>",sub:"<profile>",cc:"xx",ms:30})');
   assert.doesNotMatch(run('nodesBody().body'),/<node>/,'subscription node names are escaped');
   run('S.sheet="nodes"');handlers.keydown[0]({key:'Tab',target:element(),shiftKey:false,preventDefault(){}});
+  // Telegram sign-in: offered beside the email form; a closed window changes nothing, an answer signs in
+  run('S.signed_in=false;S.me=null;S.auth.mode="login";S.screen="account"');assert.match(run('signInScreen()'),/data-act="auth-telegram"[^>]*>Continue with Telegram/);
+  run('S.auth.mode="forgot"');assert.doesNotMatch(run('signInScreen()'),/auth-telegram/);run('S.auth.mode="login"');
+  await run('act["auth-telegram"]()');assert.equal(run('S.signed_in'),false,'closing the Telegram window does not sign in');assert.equal(run('S.authBusy'),false);
+  telegramAnswers=true;await run('act["auth-telegram"]()');assert.equal(run('S.signed_in'),true);assert.equal(run('S.me.id'),1);assert.equal(run('S.screen'),'home');telegramAnswers=false;
   run('S.signed_in=false;S.auth.mode="register"');assert.match(run('signInScreen()'),/id="terms"/);assert.match(run('signInScreen()'),/id="personal-data"/);
   query('#terms').checked=true;query('#personal-data').checked=true;
   await handlers.submit[0]({target:{id:'register',querySelector:()=>element()},preventDefault(){}});
