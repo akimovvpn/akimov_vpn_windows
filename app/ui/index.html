@@ -1,8 +1,15 @@
 <!doctype html>
-<html lang="en" data-d="1" data-theme="dark" data-view="desktop" data-auth="restoring">
+<html lang="en" class="is-splash" data-d="1" data-theme="dark" data-view="desktop" data-auth="restoring">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>акимов vpn</title><link rel="stylesheet" href="fonts.css"><link rel="stylesheet" href="style.css"><script src="app.js" defer></script></head>
 <body>
-<div class="stage">
+<div id="splash" class="startup-splash" role="status" aria-label="Opening your account…">
+  <svg class="splash-mark" viewBox="0 0 64 64" aria-hidden="true">
+    <path pathLength="100" d="M44 34a14 14 0 1 1-28 0a14 14 0 0 1 28 0" />
+    <path pathLength="100" d="M46 19V49" />
+  </svg>
+  <div class="splash-word" aria-hidden="true"><b>акимов</b><i>vpn</i></div>
+</div>
+<div class="stage" inert>
   <div class="window" id="win" data-conn="idle">
     <div class="bg"><i></i><i></i><i></i></div>
     <header class="bar"><button class="logo" id="logo" data-act="go" data-v="home" aria-label="Home"></button><span class="word" id="word"></span><span class="sp"></span>

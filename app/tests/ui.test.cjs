@@ -10,7 +10,7 @@ function element() {
   return {dataset:{},style:{setProperty(){}},classList:classes(),children:[],innerHTML:'',textContent:'',hidden:false,isConnected:true,offsetWidth:1060,
     setAttribute(){},getAttribute(){return null},removeAttribute(){},focus(){},select(){},append(){},prepend(){},remove(){this.isConnected=false},
     getBoundingClientRect:()=>({left:0,top:0,width:10,height:10}),querySelector:query,querySelectorAll:()=>[],matches:()=>false,contains:()=>false,
-    animate(){},addEventListener(){},getContext:()=>({scale(){},stroke(){},beginPath(){},arc(){},fill(){},getImageData(){const data=new Uint8Array(256*256*4);data[3]=255;return {data}}})};
+    animate(){},getAnimations:()=>[],addEventListener(){},getContext:()=>({scale(){},stroke(){},beginPath(){},arc(){},fill(){},getImageData(){const data=new Uint8Array(256*256*4);data[3]=255;return {data}}})};
 }
 function query(selector) {if(!nodes.has(selector))nodes.set(selector,element());return nodes.get(selector)}
 const me = {id:1,email:'fixture@example.invalid',balance:100000,discount:{percent:7},payment_methods:[{id:'yookassa',name:'Cards',fee_percent:5}],subscriptions:[

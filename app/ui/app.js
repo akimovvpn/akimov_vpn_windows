@@ -366,7 +366,7 @@ function renderSide(){
 }
 function render(){
   root.dataset.auth=S.restoring?"restoring":S.signed_in?"signed-in":"signed-out";$("#logo").disabled=S.restoring||!S.signed_in;
-  const screen=S.signed_in?S.screen:"account",m=$("#main");m.innerHTML=S.restoring?'<section class="startup" role="status" aria-live="polite"><span class="startup-dot"></span><p class="cap dim">Opening your account…</p></section>':screens[screen]();startAnimation();
+  const screen=S.signed_in?S.screen:"account",m=$("#main");m.innerHTML=S.restoring?"":screens[screen]();startAnimation();
   [...m.children].forEach((c,i)=>c.style.setProperty("--k",i));
   $$(".stag",m).forEach(s=>[...s.children].forEach((c,i)=>c.style.setProperty("--k",Math.min(i,9)+1)));
   if(S.signed_in&&screen==="home"){setConn(S.conn);renderSide()}
@@ -897,8 +897,18 @@ document.addEventListener('submit',async event=>{
 
 document.addEventListener("change",event=>{if(event.target.id==="topup-amount"&&S.pay&&!S.pay.busy){S.pay.amount=Math.round(Number(event.target.value)*100);renderSheet()}});
 document.addEventListener("visibilitychange",()=>{if(document.hidden){cancelAnimationFrame(frameHandle);frameHandle=0;stopPaymentPoll()}else{startAnimation();if(S.pay?.step==="wait"&&S.sheet==="pay")checkPayment().catch(report);refreshScreen(S.screen).catch(background)}watchTraffic().catch(report)});
+async function hideSplash(){
+  const splash=$("#splash");
+  if(!splash||splash.dataset.dismissing)return;
+  splash.dataset.dismissing="true";
+  await Promise.allSettled(splash.getAnimations({subtree:true}).map(a=>a.finished));
+  root.classList.remove("is-splash");$(".stage").inert=false;$("#main").classList.add("enter");entered();
+  splash.classList.add("is-leaving");
+  await Promise.allSettled(splash.getAnimations({subtree:true}).map(a=>a.finished));
+  splash.remove();
+}
 async function boot(){
-  readTheme();resample();buildShell();render();$("#main").classList.add("enter");entered();
+  readTheme();resample();buildShell();render();
   void loadLegal();
   await window.__TAURI__.event.listen("tick",({payload:p})=>{
     S.secs=p.secs;S.dn=p.dn;S.up=p.up;
@@ -909,10 +919,10 @@ async function boot(){
   await window.__TAURI__.event.listen("tray-toggle",()=>{toggle().catch(report)});
   await window.__TAURI__.event.listen("dropped",()=>{S.conns=[];connEls.clear();S.secs=0;setConn("idle");if(["home","conns"].includes(S.screen))rr();toast("Disconnected. The VPN core stopped.")});
   const core=await invoke("boot");engineBoot(core);paintScreen(S.screen);
-  try{S.cabinet=await invoke("cabinet_boot");S.signed_in=S.cabinet.signed_in;const known=S.cabinet.me||S.signed_in&&cacheGet("/me");if(known)applyMe(known);if(!S.signed_in)cacheClear();if(S.cabinet.error)background(S.cabinet.error)}catch(error){background(error)}finally{S.restoring=false;paintScreen(S.screen)}
+  try{S.cabinet=await invoke("cabinet_boot");S.signed_in=S.cabinet.signed_in;const known=S.cabinet.me||S.signed_in&&cacheGet("/me");if(known)applyMe(known);if(!S.signed_in)cacheClear();if(S.cabinet.error)background(S.cabinet.error)}catch(error){background(error)}finally{S.restoring=false;paintScreen(S.screen);void hideSplash()}
   if(S.signed_in&&!S.cabinet.me)void refreshScreen(S.screen).catch(background);
   if(S.signed_in&&await ensureSubscription())await loadNodes();
   document.fonts?.ready.then(markNav);setTimeout(markNav,300);
 }
 const trafficIds=new Map();
-boot().catch(report);
+boot().catch(error=>{S.restoring=false;paintScreen(S.screen);report(error);void hideSplash()});
