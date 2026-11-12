@@ -30,6 +30,6 @@ The GitHub Actions workflow builds releases for `v*` tags, runs the UI and Rust 
 
 See [app/README.md](app/README.md) for architecture, storage, payment limitations and optional network tests. Run the regular UI checks with `node app/tests/ui.test.cjs` and `node app/tests/ui-render.cjs`.
 
-The separate mihomo executable is GPL-3.0. [Source patch and rebuild instructions](app/core-patches/README.md) and upstream source are available with releases. Wintun, fonts and flag assets retain their respective licenses in [app/licenses](app/licenses).
+The separate mihomo executable is GPL-3.0. [Source patch and rebuild instructions](app/core-patches/README.md) and upstream source are available with releases. Wintun, fonts, flag assets and the bundled routing databases (`geoip.metadb`, `GeoSite.dat`, fetched by `build-core.ps1` so the core never downloads them when connecting) retain their respective licenses in [app/licenses](app/licenses).
 
 Local sessions, subscription files, diagnostic captures, private architecture notes, generated binaries and build output are excluded from Git. No panel or cabinet administration token is required.

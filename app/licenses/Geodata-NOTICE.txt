@@ -1,0 +1,16 @@
+Routing databases shipped in the core folder
+
+geoip.metadb and GeoSite.dat are unmodified copies of the files published by
+MetaCubeX/meta-rules-dat (https://github.com/MetaCubeX/meta-rules-dat,
+"latest" release, GPL-3.0), downloaded when this app was built. Their SHA-256
+checksums are recorded in core/manifest.json.
+
+geoip.metadb is derived from Loyalsoldier/geoip
+(https://github.com/Loyalsoldier/geoip, CC BY-SA 4.0), which includes GeoLite2
+data created by MaxMind, available from https://www.maxmind.com.
+
+GeoSite.dat is derived from Loyalsoldier/v2ray-rules-dat
+(https://github.com/Loyalsoldier/v2ray-rules-dat) and
+v2fly/domain-list-community (https://github.com/v2fly/domain-list-community, MIT).
+
+The full GPL-3.0 text is in mihomo-LICENSE.txt in this folder.

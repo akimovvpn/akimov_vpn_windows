@@ -42,6 +42,12 @@ try {
     $binary = Join-Path $OutputDirectory 'mihomo-windows-amd64-compatible.exe'
     & $Go build -buildvcs=false -tags with_gvisor -trimpath -ldflags '-s -w -X github.com/metacubex/mihomo/constant.Version=v1.19.33-akimov.2' -o $binary .
     if ($LASTEXITCODE -ne 0) { throw 'Core build failed.' }
+    # Routing databases for the subscription's GEOIP/GEOSITE rules, shipped so the core never downloads them when connecting.
+    $geoip = Join-Path $OutputDirectory 'geoip.metadb'
+    $geosite = Join-Path $OutputDirectory 'GeoSite.dat'
+    Invoke-WebRequest 'https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.metadb' -OutFile $geoip
+    Invoke-WebRequest 'https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geosite.dat' -OutFile $geosite
+    if ((Get-Item -LiteralPath $geoip).Length -lt 1MB -or (Get-Item -LiteralPath $geosite).Length -lt 1MB) { throw 'A routing database download is incomplete.' }
     [ordered]@{
         version = 'v1.19.33-akimov.2'
         upstream = "https://github.com/MetaCubeX/mihomo/tree/v$version"
@@ -49,6 +55,8 @@ try {
         patch_sha256 = (Get-FileHash -LiteralPath $patch).Hash.ToLowerInvariant()
         url_test_patch_sha256 = (Get-FileHash -LiteralPath $urlPatch).Hash.ToLowerInvariant()
         binary_sha256 = (Get-FileHash -LiteralPath $binary).Hash.ToLowerInvariant()
+        geoip_sha256 = (Get-FileHash -LiteralPath $geoip).Hash.ToLowerInvariant()
+        geosite_sha256 = (Get-FileHash -LiteralPath $geosite).Hash.ToLowerInvariant()
         toolchain = (& $Go version)
     } | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $OutputDirectory 'manifest.json')
 } finally { Pop-Location }

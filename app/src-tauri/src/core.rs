@@ -178,6 +178,25 @@ pub(crate) fn core_exe() -> Result<PathBuf, String> {
     .ok_or_else(|| "The core is missing from this install.".to_string())
 }
 
+/// The subscription's GEOIP and GEOSITE rules need these before the core can start. Left to
+/// itself the core downloads them at that moment, which fails on a restricted network or
+/// behind another VPN, so the installed copies are put in place first.
+// shortcut: copied only when missing, so a newer app does not refresh them; compare versions if stale data ever matters.
+fn seed_geodata() {
+    let Some(bundled) = core_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(PathBuf::from))
+    else {
+        return;
+    };
+    let target = data_dir().join("core");
+    for name in ["geoip.metadb", "GeoSite.dat"] {
+        if !target.join(name).is_file() {
+            let _ = std::fs::copy(bundled.join(name), target.join(name));
+        }
+    }
+}
+
 fn free_port() -> Result<u16, String> {
     std::net::TcpListener::bind("127.0.0.1:0")
         .and_then(|l| l.local_addr())
@@ -645,6 +664,7 @@ impl Engine {
         }
         let secret = random_hex();
         let built = config::build(&sub, &st.settings.rules, mixed, ctl, &secret, tun)?;
+        seed_geodata();
         let cfg = dir.join("core").join("config.yaml");
         std::fs::write(&cfg, &built.yaml).map_err(|e| e.to_string())?;
         let mut child = crate::process::Process::spawn(
@@ -956,6 +976,7 @@ impl Engine {
         let path = directory.join(format!("latency-{}", random_hex()));
         std::fs::create_dir(&path).map_err(|e| e.to_string())?;
         let files = ProbeDir { path, base };
+        seed_geodata();
         for name in ["geoip.metadb", "Country.mmdb", "GeoIP.dat", "GeoSite.dat"] {
             let cached = directory.join("core").join(name);
             if cached.is_file() {

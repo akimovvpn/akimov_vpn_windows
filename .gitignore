@@ -6,6 +6,8 @@ app/tests/tun-check.log
 app/tests/tun-check.exit
 .tools/
 app/src-tauri/core/*.exe
+app/src-tauri/core/geoip.metadb
+app/src-tauri/core/GeoSite.dat
 .env
 .env.*
 !.env.example

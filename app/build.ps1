@@ -16,6 +16,7 @@ try {
     Copy-Item -LiteralPath 'src-tauri/core/mihomo-windows-amd64-compatible.exe' -Destination (Join-Path $destination 'core/mihomo.exe')
     Copy-Item -LiteralPath 'src-tauri/core/wintun.dll' -Destination (Join-Path $destination 'core/wintun.dll')
     Copy-Item -LiteralPath 'src-tauri/core/manifest.json' -Destination (Join-Path $destination 'core/manifest.json')
+    Copy-Item -LiteralPath 'src-tauri/core/geoip.metadb','src-tauri/core/GeoSite.dat' -Destination (Join-Path $destination 'core')
     Copy-Item -LiteralPath 'core-patches' -Destination $destination -Recurse -Force
     Copy-Item -LiteralPath 'build-core.ps1' -Destination $destination
     Copy-Item -LiteralPath 'README.md' -Destination $destination
