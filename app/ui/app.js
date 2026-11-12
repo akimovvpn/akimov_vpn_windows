@@ -454,7 +454,7 @@ const STEP={plan:0,method:1,wait:2,done:3,fail:3};
 function promoBody(){return{title:"Promo code",body:`<form id="promo" class="col"><label for="promo-code" class="cap">Enter your code</label><input class="input mono" id="promo-code" autocomplete="off" spellcheck="false" maxlength="64" required><p class="cap dim">A code can add balance, days or a discount to your account.</p><button class="btn primary block" type="submit">Apply code</button></form>`,foot:""}}
 /* Real account and checkout adapters below keep the prototype's sheet animation plumbing. */
 
-const msHTML=n=>n.id==="auto"?"":`<span class="mono ms" data-ms="${esc(n.id)}" title="${n.url?"URL test: "+esc(n.url):"URL test has not completed successfully"}" style="color:var(--${["timeout","failed"].includes(n.status)?"bad":n.ms==null?"ink3":n.ms<120?"ok":"warn"})">${n.ms==null?(n.status==="failed"?"Test failed":n.status==="timeout"?"timeout":"Not tested"):n.ms+" ms"}</span>`;
+const msHTML=n=>n.id==="auto"?"":`<span class="ms" data-ms="${esc(n.id)}" title="${n.url?"Warm HTTPS request: "+esc(n.url):"URL test has not completed successfully"}" style="color:var(--${["timeout","failed"].includes(n.status)?"bad":n.ms==null?"ink3":n.ms<120?"ok":"warn"})">${n.ms==null?(n.status==="failed"?"Test failed":n.status==="timeout"?"timeout":S.testing?"Testing…":"Not tested"):n.ms+' <span class="ms-unit">ms</span>'}</span>`;
 function nodesBody(){
   return{title:"Choose a node",body:`<div class="col" style="gap:8px">${NODES.map(n=>`<button class="opt ${S.just==="n"+n.id?"just":""}" data-act="node" data-v="${esc(n.id)}" aria-pressed="${S.node===n.id}">${tickEl}<span class="cc">${nodeFlag(n.id)}</span><span class="grow"><span style="font-weight:600;display:block">${esc(n.name)}</span><span class="cap dim">${esc(n.sub)}</span></span>${msHTML(n)}</button>`).join("")}</div>`,
     foot:`<div class="row"><button class="btn grow" data-act="subscription-refresh" ${S.refreshing||S.testing?"disabled":""}>${S.refreshing?"Updating…":"Update subscription"}</button><button class="btn grow ${S.testing?"loading":""}" data-act="test" ${S.testing||S.refreshing?"disabled":""}>${S.testing?"Testing…":"Test latency"}</button></div>${S.conn!=="connected"?'<p class="cap dim">Your choice will be used when you connect.</p>':""}`};
@@ -699,6 +699,13 @@ function applyNodes(result){
   if(S.sheet==="nodes")renderSheet();
   if(S.screen==="home"){renderSide();renderStatus()}
 }
+function applyLatency(result){
+  const node=NODES.find(n=>n.id===result.name);
+  if(!node)return;
+  Object.assign(node,{ms:result.delay>0?result.delay:null,status:result.status,url:result.url});
+  const el=$$("[data-ms]").find(el=>el.dataset.ms===node.id);
+  if(el)el.outerHTML=msHTML(node);
+}
 async function useSubscription(id){
   if(S.deviceBusy)return;
   const reconnect=S.conn==="connected";
@@ -842,7 +849,7 @@ Object.assign(act,{
   mode:async el=>{if(S.mode===el.dataset.v)return;if(S.conn!=="idle"||S.busy)throw Error("Disconnect before changing mode.");await invoke("set_mode",{mode:el.dataset.v});S.mode=el.dataset.v;S.screen==="home"?renderSide():rr();renderBar()},
   nodes:async()=>{if(!await ensureSubscription()){go("subs");return}await loadNodes();S.sheet="nodes";renderSheet()},
   node:async el=>{await invoke("select_node",{name:el.dataset.v});S.node=el.dataset.v;S.just="n"+S.node;renderSheet();setTimeout(()=>{closeSheet();S.screen==="home"?(renderSide(),renderStatus()):rr();renderBar()},reduced()?0:320)},
-  test:async()=>{if(S.testing||S.refreshing)return;S.testing=true;renderSheet();try{if(!await ensureSubscription()){go("subs");return}applyNodes(await invoke("test_latency"))}catch(error){if(!/cancelled/i.test(String(error)))throw error}finally{S.testing=false;if(S.sheet==="nodes")renderSheet()}},
+  test:async()=>{if(S.testing||S.refreshing)return;S.testing=true;renderSheet();try{if(!await ensureSubscription()){go("subs");return}const onResult=new window.__TAURI__.core.Channel();onResult.onmessage=applyLatency;applyNodes(await invoke("test_latency",{onResult}))}catch(error){if(!/cancelled/i.test(String(error)))throw error}finally{S.testing=false;if(S.sheet==="nodes")renderSheet()}},
   pause:async()=>{S.paused=!S.paused;await watchTraffic();rr()},
   "switch-ok":el=>useSubscription(+el.dataset.id),
   "pay-buy":()=>openPay("buy"),"pay-renew":el=>openPay("renew",+el.dataset.id||undefined),"pay-slot":()=>openPay("slot"),"pay-traffic":el=>openPay("traffic",+el.dataset.id),"pay-topup":()=>openPay("topup"),

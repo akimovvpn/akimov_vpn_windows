@@ -1,0 +1,107 @@
+--- a/adapter/adapter.go
++++ b/adapter/adapter.go
+@@ -6,7 +6,6 @@
+ 	"fmt"
+ 	"net"
+ 	"net/url"
+-	"strings"
+ 	"time"
+ 
+ 	"github.com/metacubex/mihomo/common/atomic"
+@@ -15,7 +14,6 @@
+ 	"github.com/metacubex/mihomo/common/xsync"
+ 	"github.com/metacubex/mihomo/component/ca"
+ 	C "github.com/metacubex/mihomo/constant"
+-	"github.com/metacubex/mihomo/log"
+ 
+ 	"github.com/metacubex/http"
+ )
+@@ -257,20 +255,15 @@
+ 	_ = resp.Body.Close()
+ 
+ 	if unifiedDelay {
+-		second := time.Now()
+-		var ignoredErr error
+-		var secondResp *http.Response
+-		secondResp, ignoredErr = client.Do(req)
+-		if ignoredErr == nil {
+-			resp = secondResp
+-			_ = resp.Body.Close()
+-			start = second
+-		} else {
+-			if strings.HasPrefix(url, "http://") {
+-				log.Errorln("%s failed to get the second response from %s: %v", p.Name(), url, ignoredErr)
+-				log.Warnln("It is recommended to use HTTPS for provider.health-check.url and group.url to ensure better reliability. Due to some proxy providers hijacking test addresses and not being compatible with repeated HEAD requests, using HTTP may result in failed tests.")
+-			}
+-		}
++		if resp.Close {
++			return 0, fmt.Errorf("URL test requires a keep-alive connection")
++		}
++		start = time.Now()
++		resp, err = client.Do(req)
++		if err != nil {
++			return 0, err
++		}
++		_ = resp.Body.Close()
+ 	}
+ 
+ 	satisfied = resp != nil && (expectedStatus == nil || expectedStatus.Check(uint16(resp.StatusCode)))
+--- /dev/null
++++ b/adapter/urltest_keepalive_akimov_test.go
+@@ -0,0 +1,56 @@
++package adapter
++
++import (
++	"context"
++	"net"
++	"net/http"
++	"net/http/httptest"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/metacubex/mihomo/adapter/outbound"
++	"github.com/metacubex/mihomo/common/utils"
++	"github.com/metacubex/mihomo/component/ca"
++)
++
++func TestURLTestUnifiedKeepAlive(t *testing.T) {
++	previous := UnifiedDelay.Load()
++	UnifiedDelay.Store(true)
++	defer UnifiedDelay.Store(previous)
++	defer ca.ResetCertificate()
++	expected, _ := utils.NewUnsignedRanges[uint16]("204")
++	for _, closeConnection := range []bool{false, true} {
++		var requests, connections atomic.Int32
++		server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++			if requests.Add(1) == 1 {
++				time.Sleep(200 * time.Millisecond)
++			}
++			if closeConnection {
++				w.Header().Set("Connection", "close")
++			}
++			w.WriteHeader(http.StatusNoContent)
++		}))
++		server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
++			if state == http.StateNew {
++				connections.Add(1)
++			}
++		}
++		server.StartTLS()
++		if err := ca.AddCertificate(string(server.Certificate().Raw)); err != nil {
++			t.Fatal(err)
++		}
++		proxy := NewProxy(outbound.NewDirect())
++		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
++		delay, err := proxy.URLTest(ctx, server.URL, expected)
++		cancel()
++		server.Close()
++		if closeConnection {
++			if err == nil || delay != 0 {
++				t.Fatalf("failed keep-alive must not report cold latency: delay=%d error=%v", delay, err)
++			}
++		} else if err != nil || delay == 0 || delay >= 150 || requests.Load() != 2 || connections.Load() != 1 {
++			t.Fatalf("must time the warm request on one TLS connection: delay=%d requests=%d connections=%d error=%v", delay, requests.Load(), connections.Load(), err)
++		}
++	}
++}

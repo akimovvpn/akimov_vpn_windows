@@ -239,6 +239,8 @@ details[open]>.list{animation:swap calc(var(--t)*1.4) var(--e)}
 .mark i+i{animation-delay:.6s}
 @keyframes burst{from{opacity:.55;transform:scale(1)}to{opacity:0;transform:scale(1.9)}}
 .mark.bad{animation:shake .45s .5s}
+.ms{font:500 12px/18px var(--f-t);font-variant-numeric:tabular-nums;white-space:nowrap}
+.ms-unit{font-size:11px;font-weight:400;color:var(--ink3)}
 .ms.pop{animation:pop .35s var(--e)}
 .toasts{position:absolute;left:0;right:0;bottom:18px;z-index:20;display:flex;flex-direction:column;align-items:center;gap:8px;pointer-events:none}
 .toast:has(.btn){padding-right:8px}

@@ -24,9 +24,10 @@ if (!(Test-Path -LiteralPath (Join-Path $source '.git'))) {
 }
 $patch = Join-Path $PSScriptRoot 'core-patches/reality-client.patch'
 $urlPatch = Join-Path $PSScriptRoot 'core-patches/url-test-status.patch'
+$keepAlivePatch = Join-Path $PSScriptRoot 'core-patches/url-test-keepalive.patch'
 Push-Location $source
 try {
-    foreach ($corePatch in @($patch, $urlPatch)) {
+    foreach ($corePatch in @($patch, $urlPatch, $keepAlivePatch)) {
         git apply --check $corePatch 2>$null
         if ($LASTEXITCODE -eq 0) {
             git apply $corePatch
@@ -36,11 +37,11 @@ try {
             if ($LASTEXITCODE -ne 0) { throw 'Core source does not match the patch.' }
         }
     }
-    & $Go test -buildvcs=false ./component/tls ./adapter/outbound ./adapter -run 'Test(RealityClientVersions|ModernRealityHelloAndLegacyOptOut|URLTestRequiresExpectedStatus)' -count=1
+    & $Go test -buildvcs=false ./component/tls ./adapter/outbound ./adapter -run 'Test(RealityClientVersions|ModernRealityHelloAndLegacyOptOut|URLTestRequiresExpectedStatus|URLTestUnifiedKeepAlive)' -count=1
     if ($LASTEXITCODE -ne 0) { throw 'Core tests failed.' }
     New-Item -ItemType Directory -Force $OutputDirectory | Out-Null
     $binary = Join-Path $OutputDirectory 'mihomo-windows-amd64-compatible.exe'
-    & $Go build -buildvcs=false -tags with_gvisor -trimpath -ldflags '-s -w -X github.com/metacubex/mihomo/constant.Version=v1.19.33-akimov.2' -o $binary .
+    & $Go build -buildvcs=false -tags with_gvisor -trimpath -ldflags '-s -w -X github.com/metacubex/mihomo/constant.Version=v1.19.33-akimov.3' -o $binary .
     if ($LASTEXITCODE -ne 0) { throw 'Core build failed.' }
     # Routing databases for the subscription's GEOIP/GEOSITE rules, shipped so the core never downloads them when connecting.
     $geoip = Join-Path $OutputDirectory 'geoip.metadb'
@@ -49,11 +50,12 @@ try {
     Invoke-WebRequest 'https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geosite.dat' -OutFile $geosite
     if ((Get-Item -LiteralPath $geoip).Length -lt 1MB -or (Get-Item -LiteralPath $geosite).Length -lt 1MB) { throw 'A routing database download is incomplete.' }
     [ordered]@{
-        version = 'v1.19.33-akimov.2'
+        version = 'v1.19.33-akimov.3'
         upstream = "https://github.com/MetaCubeX/mihomo/tree/v$version"
         source_archive_sha256 = $sourceHash.ToLowerInvariant()
         patch_sha256 = (Get-FileHash -LiteralPath $patch).Hash.ToLowerInvariant()
         url_test_patch_sha256 = (Get-FileHash -LiteralPath $urlPatch).Hash.ToLowerInvariant()
+        url_test_keepalive_patch_sha256 = (Get-FileHash -LiteralPath $keepAlivePatch).Hash.ToLowerInvariant()
         binary_sha256 = (Get-FileHash -LiteralPath $binary).Hash.ToLowerInvariant()
         geoip_sha256 = (Get-FileHash -LiteralPath $geoip).Hash.ToLowerInvariant()
         geosite_sha256 = (Get-FileHash -LiteralPath $geosite).Hash.ToLowerInvariant()

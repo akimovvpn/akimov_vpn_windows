@@ -382,9 +382,15 @@ fn select_node(e: Eng, name: String) -> Result<Value, String> {
     e.select_node(name)
 }
 #[tauri::command(async)]
-fn test_latency(e: Eng, gate: Gate) -> Result<Value, String> {
+fn test_latency(
+    e: Eng,
+    gate: Gate,
+    on_result: tauri::ipc::Channel<Value>,
+) -> Result<Value, String> {
     let _guard = gate.0.lock().map_err(|_| "Account operation failed.")?;
-    e.test_latency()
+    e.test_latency(|value| {
+        let _ = on_result.send(value);
+    })
 }
 #[tauri::command(async)]
 fn set_rules(e: Eng, rules: Vec<config::Rule>) -> Result<Value, String> {

@@ -17,9 +17,9 @@ const me = {id:1,email:'fixture@example.invalid',balance:100000,discount:{percen
   {id:77,plan:'Fixture <plan>',tariff_id:2,status:'active',days_left:30,term_days:90,expires_at:'2027-01-01T00:00:00Z',traffic_gb:500,used_gb:125,devices:5,plan_devices:5,plan_traffic_gb:500,extra_device_price_kopecks:1500,extra_gb_price_kopecks:5000,addon_months_remaining:2,renew_price_per_30_kopecks:25001},
   {id:78,plan:'Second',tariff_id:2,status:'active',days_left:60,term_days:90,expires_at:'2027-02-01T00:00:00Z',traffic_gb:100,used_gb:0,devices:3}
 ]};
-let offline=false,telegramAnswers=false,deleteWait=null,buyTerminal=false,buyWait=null,connectWait=null,connectError=null,buyFails=1,promoFails=false,core={has_sub:true,connected:false,rules:[],mode:'tun',node:'Fixture <server>',hwid:'own/hwid',sub_id:77,version:'0.1.0'};
+let latencyWait=null,offline=false,telegramAnswers=false,deleteWait=null,buyTerminal=false,buyWait=null,connectWait=null,connectError=null,buyFails=1,promoFails=false,core={has_sub:true,connected:false,rules:[],mode:'tun',node:'Fixture <server>',hwid:'own/hwid',sub_id:77,version:'0.1.0'};
 const document={hidden:false,documentElement:element(),activeElement:element(),fonts:{ready:Promise.resolve()},querySelector:query,querySelectorAll:()=>[],createElement:element,addEventListener:(name,fn)=>(handlers[name]??=[]).push(fn)};
-const context = vm.createContext({document,window:{__TAURI__:{event:{listen:async(name,fn)=>events[name]=fn},core:{invoke:async(name,args)=>{
+const context = vm.createContext({document,window:{__TAURI__:{event:{listen:async(name,fn)=>events[name]=fn},core:{Channel:class {},invoke:async(name,args)=>{
   calls.push([name,args]);
   if(name==='boot')return {...core};
   if(name==='cabinet_boot')return {configured:true,signed_in:true,base_url:'https://example.invalid/api/v1',cabinet_url:'https://example.invalid',me:structuredClone(me)};
@@ -31,6 +31,7 @@ const context = vm.createContext({document,window:{__TAURI__:{event:{listen:asyn
   if(name==='disconnect'){core.connected=false;return {ok:true}}
   if(name==='clear_subscription'){if(args?.expectedSubId&&args.expectedSubId!==core.sub_id)return {ok:true};core.has_sub=false;core.sub_id=null;return {ok:true}}
   if(name==='cabinet_use_subscription'){if(offline)throw 'Cabinet connection failed. Check your internet and API address.';core.sub_id=args.subId;core.has_sub=true;return {...core}}
+  if(name==='test_latency'&&latencyWait)return latencyWait(args);
   if(name==='proxies'||name==='test_latency')return {nodes:[{name:'Fixture <server>',delay:30}],now:'Fixture <server>'};
   if(name==='cabinet_request'){
     if(offline)throw 'Cabinet connection failed. Check your internet and API address.';
@@ -157,6 +158,19 @@ const flush = () => new Promise(resolve=>setImmediate(resolve));
   assert.equal(run('S.conn'),'connected');
   run('renderStatus()');assert.doesNotMatch(query('#status').innerHTML,/From your subscription|Fixture &lt;server&gt;/,'connected status shows the timer and traffic without the server subtitle');
   assert.match(run('msHTML({id:"fixture",status:"failed",ms:null})'),/Test failed/);
+  run('applyNodes({now:"Fixture <server>",nodes:[{name:"Fixture <server>",delay:30},{name:"Slow",status:"unknown"}]})');
+  let progress,releaseLatency;
+  latencyWait=args=>{progress=args?.onResult;return new Promise(resolve=>releaseLatency=resolve)};
+  const testing=run('act.test()');await flush();
+  assert.equal(run('S.testing'),true);
+  assert(progress,'latency command must accept a progress channel');
+  progress.onmessage({name:'Fixture <server>',delay:18,status:'ok',url:'https://example.invalid/check'});
+  assert.equal(run('NODES[0].ms'),18,'a finished server updates while another server is pending');
+  assert.equal(run('NODES[1].ms'),null);assert.equal(run('S.node'),'Fixture <server>');
+  progress.onmessage({name:'Removed server',delay:1,status:'ok'});
+  assert.equal(run('NODES.length'),2,'late results cannot restore removed servers');
+  releaseLatency({now:'Fixture <server>',nodes:[{name:'Fixture <server>',delay:18,status:'ok'},{name:'Slow',status:'failed'}]});
+  await testing;latencyWait=null;assert.equal(run('S.testing'),false);assert.equal(run('NODES[1].status'),'failed');
   run('S.testing=true');await run('toggle()');assert.equal(run('S.conn'),'idle','latency testing must not block Disconnect');run('S.testing=false');await run('toggle()');
   await run(`go('conns');watchTraffic()`);
   assert(calls.some(([name,args])=>name==='watch'&&args.on));

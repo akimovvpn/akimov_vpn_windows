@@ -590,7 +590,7 @@ impl Engine {
     }
 
     fn verify_connection(&self) -> Result<(), String> {
-        let measured = self.test_latency()?;
+        let measured = self.test_latency(|_| {})?;
         let selected = measured["now"].as_str().ok_or("vpn_unreachable")?;
         if !measured["nodes"].as_array().is_some_and(|nodes| {
             nodes
@@ -1099,12 +1099,12 @@ impl Engine {
                 secret,
                 "GET",
                 &format!(
-                    "/proxies/{}/delay?url={}&timeout=8000&expected=204",
+                    "/proxies/{}/delay?url={}&timeout=2000&expected=204",
                     enc(name),
                     enc(url)
                 ),
                 None,
-                10,
+                3,
             ) {
                 if result["delay"].as_u64().is_some_and(|delay| delay > 0) {
                     return json!({"delay":result["delay"],"status":"ok","url":url});
@@ -1114,7 +1114,7 @@ impl Engine {
         json!({"delay":null,"status":"failed","url":null})
     }
 
-    pub fn test_latency(&self) -> Result<Value, String> {
+    pub fn test_latency(&self, progress: impl Fn(Value) + Sync) -> Result<Value, String> {
         if self.testing.swap(true, SeqCst) {
             return Err("A latency test is already running.".into());
         }
@@ -1165,16 +1165,30 @@ impl Engine {
             let next = std::sync::atomic::AtomicUsize::new(0);
             std::thread::scope(|scope| {
                 for _ in 0..16.min(targets.len()) {
-                    let (next, results, secret) = (&next, &results, &secret);
+                    let (next, results, secret, progress) = (&next, &results, &secret, &progress);
                     scope.spawn(move || loop {
-                        if self.closing.load(SeqCst) || self.gen.load(SeqCst) != generation {
+                        if self.closing.load(SeqCst)
+                            || self.gen.load(SeqCst) != generation
+                            || self.profile_revision.load(SeqCst) != revision
+                        {
                             break;
                         }
                         let Some(name) = targets.get(next.fetch_add(1, SeqCst)) else {
                             break;
                         };
-                        let measured = self.measure_proxy(ctl, secret, name);
-                        results.lock().unwrap().insert(name.clone(), measured);
+                        let mut measured = self.measure_proxy(ctl, secret, name);
+                        if self.closing.load(SeqCst)
+                            || self.gen.load(SeqCst) != generation
+                            || self.profile_revision.load(SeqCst) != revision
+                        {
+                            break;
+                        }
+                        measured["name"] = json!(name);
+                        results
+                            .lock()
+                            .unwrap()
+                            .insert(name.clone(), measured.clone());
+                        progress(measured);
                     });
                 }
             });
@@ -1345,7 +1359,7 @@ mod tests {
     fn windows_cached_subscription_latency() {
         let engine = Engine::new();
         let snapshot = engine
-            .test_latency()
+            .test_latency(|_| {})
             .expect("Cached subscription latency startup failed");
         let nodes = snapshot["nodes"].as_array().unwrap();
         let working = nodes.iter().filter(|node| node["status"] == "ok").count();
@@ -1624,7 +1638,20 @@ mod tests {
             "Temporary profiles must be removed after testing"
         );
         assert!(std::net::TcpStream::connect(("127.0.0.1", probe_port)).is_err());
-        let measured = engine.test_latency().unwrap();
+        let updates = Mutex::new(Vec::new());
+        let measured = engine
+            .test_latency(|value| updates.lock().unwrap().push(value))
+            .unwrap();
+        for node in measured["nodes"].as_array().unwrap() {
+            assert!(
+                updates
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|update| update["name"] == node["name"]
+                        && update["status"] == node["status"])
+            );
+        }
         assert!(!measured["nodes"].as_array().unwrap().is_empty());
         assert!(!engine.testing.load(SeqCst));
         assert!(engine.running().is_none());
