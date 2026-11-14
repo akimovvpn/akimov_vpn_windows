@@ -32,6 +32,30 @@
   ${EndIf}
 !macroend
 
+!ifmacrondef AKIMOV_REMOVE_HELPER
+  !macro AKIMOV_REMOVE_HELPER
+    Push $0
+    ClearErrors
+    ExecWait '"$INSTDIR\akimov-vpn.exe" --remove-helper' $0
+    ${If} ${Errors}
+      StrCpy $0 1
+    ${EndIf}
+    ${If} $0 != 0
+      MessageBox MB_OK|MB_ICONEXCLAMATION "Windows could not remove the whole-device helper. Allow administrator access and try uninstalling again." /SD IDOK
+      Pop $0
+      Abort
+    ${EndIf}
+    Pop $0
+  !macroend
+!endif
+
+; The app binary must still exist when it requests administrative helper removal.
+!macro NSIS_HOOK_PREUNINSTALL
+  ${If} $UpdateMode <> 1
+    !insertmacro AKIMOV_REMOVE_HELPER
+  ${EndIf}
+!macroend
+
 !macro NSIS_HOOK_POSTUNINSTALL
   ${If} $UpdateMode <> 1
     !insertmacro AKIMOV_WIPE

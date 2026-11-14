@@ -22,6 +22,9 @@ try {
     if ($case[2]) { New-Item $key -Force | Out-Null; Set-ItemProperty $key UninstallString 'x' }
     if ($case[1].Count) { Start-Process $exe -ArgumentList $case[1] -Wait } else { Start-Process $exe -Wait }
     foreach ($dir in $dirs) { if ((Test-Path $dir) -ne $case[3]) { throw "$($case[0]): $dir should $(if ($case[3]) { 'remain' } else { 'be removed' })." } }
+    $removed = (Get-ItemProperty $key -Name HelperRemoved -ErrorAction SilentlyContinue).HelperRemoved -eq 1
+    $shouldRemove = ($case[1] -contains '/UNINSTALL') -and ($case[1] -notcontains '/UPDATE')
+    if ($removed -ne $shouldRemove) { throw "$($case[0]): helper removal was $removed, expected $shouldRemove." }
   }
   'Installer hooks passed: saved data is removed on uninstall and clean install, kept on update.'
 } finally {

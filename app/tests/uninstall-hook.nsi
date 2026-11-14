@@ -7,6 +7,10 @@ Unicode true
 !define BUNDLEID "vpn.akimov.hooktest"
 !define UNINSTKEY "Software\akimov-hooktest"
 Var UpdateMode
+; Record helper removal without touching any installed Windows service.
+!macro AKIMOV_REMOVE_HELPER
+  WriteRegDWORD HKCU "${UNINSTKEY}" "HelperRemoved" 1
+!macroend
 !include "..\src-tauri\uninstall.nsh"
 Name "akimov hook test"
 OutFile "${OUT}"
@@ -22,6 +26,7 @@ Section
   ClearErrors
   ${GetOptions} $1 "/UNINSTALL" $2
   ${IfNot} ${Errors}
+    !insertmacro NSIS_HOOK_PREUNINSTALL
     !insertmacro NSIS_HOOK_POSTUNINSTALL
   ${Else}
     !insertmacro NSIS_HOOK_PREINSTALL

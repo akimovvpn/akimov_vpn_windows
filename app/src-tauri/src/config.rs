@@ -391,6 +391,214 @@ pub fn build(
     Ok(Built { yaml, main, nodes })
 }
 
+/// Rebuild untrusted client YAML before giving it to the SYSTEM core.
+/// HTTP providers rely on mihomo's safe-path checks: use a private runtime home,
+/// no sensitive key files, and a clean environment without path-check overrides.
+pub fn privileged_config(yaml: &str, ctl: u16, secret: &str) -> Result<String, String> {
+    if yaml.len() > 8 * 1024 * 1024 || ctl == 0 || secret.is_empty() {
+        return Err("Invalid helper configuration.".into());
+    }
+    let parsed = parse(yaml)?;
+    let mixed = parsed["mixed-port"]
+        .as_u64()
+        .and_then(|p| u16::try_from(p).ok())
+        .filter(|p| *p > 0 && *p != ctl)
+        .ok_or("Invalid helper proxy port.")?;
+
+    fn strings(value: &Value) -> bool {
+        value
+            .as_sequence()
+            .is_some_and(|items| items.iter().all(Value::is_string))
+    }
+    fn audit(value: &Value, depth: usize, proxy: bool) -> Result<(), String> {
+        if depth > 64 {
+            return Err("Helper configuration is nested too deeply.".into());
+        }
+        match value {
+            Value::Mapping(map) => {
+                for (key, item) in map {
+                    let key = key.as_str().ok_or("Invalid helper configuration key.")?;
+                    match key {
+                        "script" | "script-file" | "restls-script" | "command" | "exec"
+                        | "post-up" | "post-down" | "env" | "environment" | "plugin-path"
+                        | "ca-file" | "cert-file" | "key-file" | "certificate-file"
+                        | "private-key-file" | "state-dir" | "planet" | "override-expr" => {
+                            return Err(format!("{key} is not supported by the helper."));
+                        }
+                        "certificate" => {
+                            let text = item.as_str().ok_or("Invalid inline certificate.")?;
+                            if !text.is_empty()
+                                && !(text.trim_start().lines().next()
+                                    == Some("-----BEGIN CERTIFICATE-----")
+                                    && text.contains('\n')
+                                    && text.contains("-----END CERTIFICATE-----"))
+                            {
+                                return Err(
+                                    "Certificate files are not supported by the helper.".into()
+                                );
+                            }
+                        }
+                        "private-key" => {
+                            let text = item.as_str().ok_or("Invalid inline private key.")?;
+                            // WireGuard and MASQUE decode their key as data, never as a file path.
+                            let inline = proxy
+                                && matches!(
+                                    map.get("type").and_then(Value::as_str),
+                                    Some("wireguard" | "masque")
+                                );
+                            if !inline
+                                && !text.is_empty()
+                                && !(text.trim_start().starts_with("-----BEGIN ")
+                                    && text.lines().any(|line| line.ends_with("PRIVATE KEY-----"))
+                                    && text.contains('\n')
+                                    && text.contains("-----END "))
+                            {
+                                return Err(
+                                    "Private key files are not supported by the helper.".into()
+                                );
+                            }
+                        }
+                        "plugin"
+                            if !matches!(
+                                item.as_str(),
+                                Some(
+                                    "" | "obfs"
+                                        | "v2ray-plugin"
+                                        | "gost-plugin"
+                                        | "shadow-tls"
+                                        | "restls"
+                                        | "jls"
+                                        | "kcptun"
+                                )
+                            ) =>
+                        {
+                            return Err("External plugins are not supported by the helper.".into());
+                        }
+                        _ => {}
+                    }
+                    if (key.ends_with("-opts")
+                        || matches!(
+                            key,
+                            "health-check" | "override" | "header" | "headers" | "smux"
+                        ))
+                        && !item.is_mapping()
+                    {
+                        return Err(format!("Invalid {key} options."));
+                    }
+                    audit(item, depth + 1, key == "proxies" || key == "payload")?;
+                }
+            }
+            Value::Sequence(items) => {
+                for item in items {
+                    audit(item, depth + 1, proxy)?;
+                }
+            }
+            Value::Tagged(_) => return Err("YAML tags are not supported by the helper.".into()),
+            _ => {}
+        }
+        Ok(())
+    }
+    let mut sub = Mapping::new();
+    for key in KEEP {
+        let Some(value) = parsed.get(key) else {
+            continue;
+        };
+        let valid = match key {
+            "proxies" | "proxy-groups" => value.as_sequence().is_some_and(|items| {
+                items.iter().all(|item| {
+                    item.is_mapping() && item["name"].is_string() && item["type"].is_string()
+                })
+            }),
+            "proxy-providers" | "rule-providers" => value.as_mapping().is_some_and(|providers| {
+                providers.iter().all(|(name, provider)| {
+                    name.is_string()
+                        && provider.is_mapping()
+                        && matches!(provider["type"].as_str(), Some("http" | "inline"))
+                        && (provider["type"].as_str() != Some("http")
+                            || provider["url"].as_str().is_some_and(|url| {
+                                url.starts_with("https://") || url.starts_with("http://")
+                            }))
+                        && (provider.get("payload").is_none()
+                            || if key == "proxy-providers" {
+                                provider["payload"].as_sequence().is_some_and(|items| {
+                                    items.iter().all(|item| {
+                                        item.is_mapping()
+                                            && item["name"].is_string()
+                                            && item["type"].is_string()
+                                    })
+                                })
+                            } else {
+                                strings(&provider["payload"])
+                            })
+                })
+            }),
+            "rules" => strings(value),
+            "sub-rules" => value.as_mapping().is_some_and(|rules| {
+                rules
+                    .iter()
+                    .all(|(name, rules)| name.is_string() && strings(rules))
+            }),
+            _ => false,
+        };
+        if !valid {
+            return Err(format!("Invalid helper {key}."));
+        }
+        audit(value, 0, key == "proxies")?;
+        sub.insert(key.into(), value.clone());
+    }
+    // Bound the recursive ranking that build() performs on the untrusted group graph.
+    fn group_work(
+        name: &str,
+        groups: &std::collections::HashMap<&str, &Value>,
+        depth: usize,
+        budget: &mut usize,
+    ) -> Result<(), String> {
+        if depth > 32 || *budget == 0 {
+            return Err("Proxy group references are too complex for the helper.".into());
+        }
+        *budget -= 1;
+        if let Some(group) = groups.get(name) {
+            if let Some(items) = group.get("proxies") {
+                for item in items
+                    .as_sequence()
+                    .ok_or("Invalid helper proxy group members.")?
+                {
+                    group_work(
+                        item.as_str().ok_or("Invalid helper proxy group member.")?,
+                        groups,
+                        depth + 1,
+                        budget,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+    let groups: std::collections::HashMap<_, _> = sub
+        .get("proxy-groups")
+        .and_then(Value::as_sequence)
+        .into_iter()
+        .flatten()
+        .map(|group| (group["name"].as_str().unwrap(), group))
+        .collect();
+    let mut budget = 20_000;
+    for name in groups.keys() {
+        group_work(name, &groups, 0, &mut budget)?;
+    }
+    // Client-built profiles already have this prefix; preserve the remaining rule order.
+    if let Some(rules) = sub.get_mut("rules").and_then(Value::as_sequence_mut) {
+        if rules
+            .iter()
+            .take(SYSTEM_RULES.len())
+            .filter_map(Value::as_str)
+            .eq(SYSTEM_RULES)
+        {
+            rules.drain(..SYSTEM_RULES.len());
+        }
+    }
+    Ok(build(&Value::Mapping(sub), &[], mixed, ctl, secret, true)?.yaml)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -569,5 +777,143 @@ mod tests {
         assert_eq!(v["ipv6"].as_bool(), Some(true));
         assert_eq!(v["dns"]["enable"].as_bool(), Some(true));
         assert_eq!(v["dns"]["enhanced-mode"].as_str(), Some("fake-ip"));
+    }
+
+    #[test]
+    fn privileged_profile_rebuilds_owned_settings_and_preserves_rules() {
+        let built = build(&parse(SUB).unwrap(), &[], 1111, 2222, "client", false).unwrap();
+        let input = format!("{}external-ui: C:/Windows\nexternal-controller-pipe: attacker\npost-up: calc.exe\nlisteners: [{{type: mixed, port: 8888}}]\n", built.yaml);
+        let safe = privileged_config(&input, 3333, "private").unwrap();
+        let v: Value = serde_yaml::from_str(&safe).unwrap();
+        assert_eq!(v["mixed-port"].as_u64(), Some(1111));
+        assert_eq!(v["external-controller"].as_str(), Some("127.0.0.1:3333"));
+        assert_eq!(v["secret"].as_str(), Some("private"));
+        assert_eq!(v["bind-address"].as_str(), Some("127.0.0.1"));
+        assert_eq!(v["allow-lan"].as_bool(), Some(false));
+        assert_eq!(v["tun"]["enable"].as_bool(), Some(true));
+        assert_eq!(v["tun"]["device"].as_str(), Some("akimov"));
+        assert_eq!(v["profile"]["store-selected"].as_bool(), Some(true));
+        assert_eq!(
+            v["rules"],
+            serde_yaml::from_str::<Value>(&built.yaml).unwrap()["rules"]
+        );
+        for key in [
+            "external-ui",
+            "external-controller-pipe",
+            "post-up",
+            "listeners",
+        ] {
+            assert!(v.get(key).is_none(), "{key}");
+        }
+    }
+
+    #[test]
+    fn privileged_profile_contains_provider_cache_paths() {
+        let input = "mixed-port: 1111\nproxy-providers:\n  remote: {type: http, url: 'https://example.com/nodes', path: 'C:/Windows/evil.exe'}\nrule-providers:\n  rules: {type: http, behavior: domain, url: 'https://example.com/rules', path: '../../evil.exe'}\n";
+        let safe = privileged_config(input, 2222, "private").unwrap();
+        let v: Value = serde_yaml::from_str(&safe).unwrap();
+        assert_eq!(
+            v["proxy-providers"]["remote"]["path"].as_str(),
+            Some("./providers/proxy-providers-0.yaml")
+        );
+        assert_eq!(
+            v["rule-providers"]["rules"]["path"].as_str(),
+            Some("./providers/rule-providers-0.yaml")
+        );
+        assert!(
+            privileged_config(&input.replace("type: http", "type: file"), 2222, "private").is_err()
+        );
+    }
+
+    #[test]
+    fn privileged_profile_rejects_nested_file_and_execution_options() {
+        for extra in [
+            "certificate: 'C:/Windows/cert.pem'",
+            "private-key: './secret.pem'",
+            "ws-opts: {certificate: './secret.pem'}",
+            "xhttp-opts: {download-settings: {private-key: './secret.pem'}}",
+            "plugin: 'C:/Windows/evil.exe'",
+            "plugin-opts: {certificate: './secret.pem'}",
+            "script: evil.js",
+            "post-up: calc.exe",
+            "state-dir: 'C:/Windows'",
+            "planet: './secret'",
+            "ws-opts: wrong",
+            "smux: wrong",
+        ] {
+            let input = format!("mixed-port: 1111\nproxies: [{{name: A, type: vless, server: example.com, port: 443, {extra}}}]");
+            assert!(
+                privileged_config(&input, 2222, "private").is_err(),
+                "{extra}"
+            );
+        }
+        let inline = "mixed-port: 1111\nproxy-providers: {inline: {type: inline, payload: [{name: A, type: ssh, private-key: './config.yaml'}]}}";
+        assert!(privileged_config(inline, 2222, "private").is_err());
+    }
+
+    #[test]
+    fn privileged_profile_accepts_reality_and_inline_wireguard_keys() {
+        let input = "mixed-port: 1111\nproxies:\n- {name: A, type: vless, server: example.com, port: 443, uuid: 12345678-1234-1234-1234-123456789012, tls: true, flow: xtls-rprx-vision, servername: example.com, client-fingerprint: chrome, reality-opts: {public-key: abcdefghijklmnopqrstuvwxyz, short-id: abcd}, ws-opts: {path: /socket}}\n- {name: B, type: wireguard, private-key: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=, public-key: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=, server: example.com, port: 51820}\n";
+        let safe = privileged_config(input, 2222, "private").unwrap();
+        let v: Value = serde_yaml::from_str(&safe).unwrap();
+        assert_eq!(
+            v["proxies"][0]["reality-opts"]["short-id"].as_str(),
+            Some("abcd")
+        );
+        assert_eq!(v["proxies"][0]["ws-opts"]["path"].as_str(), Some("/socket"));
+        assert_eq!(
+            v["proxies"][1]["private-key"].as_str(),
+            Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+        );
+    }
+
+    #[test]
+    fn privileged_profile_rejects_bad_ports_shapes_and_large_input() {
+        for port in ["0", "2222", "65536", "-1", "'1111'", "null"] {
+            assert!(
+                privileged_config(&format!("{SUB}mixed-port: {port}\n"), 2222, "private").is_err(),
+                "{port}"
+            );
+        }
+        for extra in [
+            "proxy-groups: wrong",
+            "proxy-providers: []",
+            "rule-providers: {bad: []}",
+            "sub-rules: []",
+            "rules: [3]",
+        ] {
+            // SUB has groups and rules already: use a single plain node to avoid duplicate YAML keys.
+            let input = format!("mixed-port: 1111\nproxies: [{{name: A, type: socks5}}]\n{extra}");
+            assert!(
+                privileged_config(&input, 2222, "private").is_err(),
+                "{extra}"
+            );
+        }
+        assert!(privileged_config(&" ".repeat(8 * 1024 * 1024 + 1), 2222, "private").is_err());
+    }
+
+    #[test]
+    fn privileged_profile_bounds_group_reference_work() {
+        for (count, duplicate) in [(40, false), (18, true)] {
+            let mut input =
+                "mixed-port: 1111\nproxies: [{name: A, type: socks5}]\nproxy-groups:\n".to_string();
+            for i in 0..count {
+                let next = if i + 1 == count {
+                    "A".into()
+                } else {
+                    format!("G{}", i + 1)
+                };
+                let refs = if duplicate {
+                    format!("{next}, {next}")
+                } else {
+                    next
+                };
+                input.push_str(&format!(
+                    "- {{name: G{i}, type: select, proxies: [{refs}]}}\n"
+                ));
+            }
+            let error = privileged_config(&input, 2222, "private").unwrap_err();
+            assert!(error.contains("references"), "{error}");
+        }
     }
 }

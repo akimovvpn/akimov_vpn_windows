@@ -5,6 +5,7 @@ mod core;
 mod hwid;
 mod process;
 mod profile;
+mod service;
 mod sysproxy;
 
 use serde_json::Value;
@@ -422,7 +423,7 @@ fn main() {
         Foundation::{GetLastError, ERROR_ALREADY_EXISTS},
         System::Threading::CreateMutexW,
     };
-    if let Some(result) = process::helper() {
+    if let Some(result) = service::early_main() {
         std::process::exit(if result.is_ok() { 0 } else { 1 });
     }
     let name: Vec<u16> = "Local\\akimov-vpn-app\0".encode_utf16().collect();

@@ -285,7 +285,9 @@ fn node_health(
     let mut result = if let Some(health) = measured.filter(|health| health["status"] == "ok") {
         health.clone()
     } else if let Some(now) = selected {
-        node_health(now, all, seen, measurements)
+        let mut result = node_health(now, all, seen, measurements);
+        result["now"] = json!(now);
+        result
     } else if measurements.is_some() {
         measured
             .cloned()
@@ -369,6 +371,64 @@ fn apply_url_measurements(snapshot: &mut Value, measurements: Option<&HashMap<St
     }
 }
 
+fn record_group_members(snapshot: &Value, results: &mut HashMap<String, Value>) {
+    for (name, measured) in results {
+        let group = &snapshot["proxies"][name];
+        if group["type"] == "URLTest" && measured["status"] == "ok" && measured.get("now").is_none()
+        {
+            measured["now"] = group["now"].clone();
+        }
+    }
+}
+
+fn selection_available(snapshot: &Value, group: &str, member: &str) -> bool {
+    snapshot["proxies"][group]["all"]
+        .as_array()
+        .is_some_and(|members| members.iter().any(|value| value == member))
+}
+
+fn seed_automatic_groups(
+    yaml: &str,
+    measurements: Option<&HashMap<String, Value>>,
+) -> Result<(String, Vec<(String, String)>), String> {
+    let Some(measurements) = measurements else {
+        return Ok((yaml.to_string(), Vec::new()));
+    };
+    let mut config: serde_yaml::Value = serde_yaml::from_str(yaml).map_err(|e| e.to_string())?;
+    let mut selections = Vec::new();
+    for group in config["proxy-groups"]
+        .as_sequence_mut()
+        .into_iter()
+        .flatten()
+    {
+        if group["type"].as_str() != Some("url-test") {
+            continue;
+        }
+        let Some(name) = group["name"].as_str() else {
+            continue;
+        };
+        let Some(measured) = measurements
+            .get(name)
+            .filter(|value| value["status"] == "ok")
+        else {
+            continue;
+        };
+        let (Some(member), Some(url)) = (measured["now"].as_str(), measured["url"].as_str()) else {
+            continue;
+        };
+        selections.push((name.to_string(), member.to_string()));
+        // Selection and automatic failover must use the URL that the manual test proved works.
+        group["url"] = url.into();
+        group["expected-status"] = "204".into();
+    }
+    let yaml = if selections.is_empty() {
+        yaml.to_string()
+    } else {
+        serde_yaml::to_string(&config).map_err(|e| e.to_string())?
+    };
+    Ok((yaml, selections))
+}
+
 fn cached_proxy_snapshot(
     text: &str,
     rules: &[config::Rule],
@@ -441,6 +501,9 @@ impl Engine {
         body: Option<Value>,
         wait: u64,
     ) -> Result<Value, String> {
+        if let Some(result) = crate::service::api(ctl, secret, method, path, body.as_ref(), wait) {
+            return result;
+        }
         let req = self
             .local
             .request(method, &format!("http://127.0.0.1:{ctl}{path}"))
@@ -453,6 +516,13 @@ impl Engine {
         .map_err(|e| e.to_string())?;
         if resp.status() == 204 {
             return Ok(Value::Null);
+        }
+        if path == "/traffic" {
+            let mut line = String::new();
+            std::io::BufReader::new(resp.into_reader())
+                .read_line(&mut line)
+                .map_err(|e| e.to_string())?;
+            return serde_json::from_str(&line).map_err(|e| e.to_string());
         }
         Ok(resp.into_json().unwrap_or(Value::Null))
     }
@@ -553,15 +623,22 @@ impl Engine {
             )?;
             let old_cfg = std::fs::read_to_string(&cfg).map_err(|e| e.to_string())?;
             std::fs::write(&cfg, &built.yaml).map_err(|e| e.to_string())?;
-            if let Err(error) = self.api(
-                run.ctl,
-                &run.secret,
-                "PUT",
-                "/configs?force=false",
-                Some(json!({"path":cfg.to_string_lossy()})),
-                10,
-            ) {
+            let reloaded = if text == old {
+                self.reload_config(run.ctl, &run.secret, &built.yaml)
+            } else {
+                self.api(
+                    run.ctl,
+                    &run.secret,
+                    "PUT",
+                    "/configs?force=false",
+                    Some(json!({"payload":built.yaml})),
+                    10,
+                )
+                .map(|_| ())
+            };
+            if let Err(error) = reloaded {
                 std::fs::write(&cfg, &old_cfg).map_err(|e| e.to_string())?;
+                self.reload_config(run.ctl, &run.secret, &old_cfg)?;
                 return Err(error);
             }
             main = Some(built.main);
@@ -588,15 +665,8 @@ impl Engine {
             st.settings.profile_hwid = old_profile_hwid;
             std::fs::write(&path, old).map_err(|e| e.to_string())?;
             if let Some((old_cfg, ctl, secret)) = rollback {
-                std::fs::write(&cfg, old_cfg).map_err(|e| e.to_string())?;
-                self.api(
-                    ctl,
-                    &secret,
-                    "PUT",
-                    "/configs?force=false",
-                    Some(json!({"path":cfg.to_string_lossy()})),
-                    10,
-                )?;
+                std::fs::write(&cfg, &old_cfg).map_err(|e| e.to_string())?;
+                self.reload_config(ctl, &secret, &old_cfg)?;
             }
             return Err(error);
         }
@@ -673,7 +743,8 @@ impl Engine {
         let built = config::build(&sub, &st.settings.rules, mixed, ctl, &secret, tun)?;
         seed_geodata();
         let cfg = dir.join("core").join("config.yaml");
-        std::fs::write(&cfg, &built.yaml).map_err(|e| e.to_string())?;
+        let (yaml, mut selections) = self.measured_config(&built.yaml)?;
+        std::fs::write(&cfg, yaml).map_err(|e| e.to_string())?;
         let mut child = crate::process::Process::spawn(
             &core_exe()?,
             &dir.join("core"),
@@ -717,14 +788,12 @@ impl Engine {
             return Err("Connection cancelled.".into());
         }
         if !st.settings.node.is_empty() {
-            let _ = self.api(
-                ctl,
-                &secret,
-                "PUT",
-                &format!("/proxies/{}", enc(&built.main)),
-                Some(json!({ "name": st.settings.node })),
-                2,
-            );
+            selections.push((built.main.clone(), st.settings.node.clone()));
+        }
+        if let Err(error) = self.restore_selections(ctl, &secret, selections) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("Could not select the saved server: {error}"));
         }
         let prev = if tun {
             None
@@ -840,15 +909,9 @@ impl Engine {
             let cfg = data_dir().join("core/config.yaml");
             let old = std::fs::read_to_string(&cfg).map_err(|e| e.to_string())?;
             std::fs::write(&cfg, &built.yaml).map_err(|e| e.to_string())?;
-            if let Err(e) = self.api(
-                run.ctl,
-                &run.secret,
-                "PUT",
-                "/configs?force=false",
-                Some(json!({"path": cfg.to_string_lossy()})),
-                10,
-            ) {
+            if let Err(e) = self.reload_config(run.ctl, &run.secret, &built.yaml) {
                 std::fs::write(&cfg, &old).map_err(|e| e.to_string())?;
+                self.reload_config(run.ctl, &run.secret, &old)?;
                 return Err(e);
             }
             rollback = Some((cfg, old, run.ctl, run.secret.clone()));
@@ -859,15 +922,8 @@ impl Engine {
         if let Err(e) = save(&st.settings) {
             st.settings.rules = before;
             if let Some((cfg, old, ctl, secret)) = rollback {
-                std::fs::write(&cfg, old).map_err(|e| e.to_string())?;
-                self.api(
-                    ctl,
-                    &secret,
-                    "PUT",
-                    "/configs?force=false",
-                    Some(json!({"path": cfg.to_string_lossy()})),
-                    10,
-                )?;
+                std::fs::write(&cfg, &old).map_err(|e| e.to_string())?;
+                self.reload_config(ctl, &secret, &old)?;
             }
             return Err(e);
         }
@@ -1118,6 +1174,53 @@ impl Engine {
         apply_url_measurements(snapshot, fresh.map(|values| &values.results));
     }
 
+    fn measured_config(&self, yaml: &str) -> Result<(String, Vec<(String, String)>), String> {
+        let saved = self.latency.lock().unwrap();
+        let fresh = saved
+            .as_ref()
+            .filter(|values| values.fresh(self.profile_revision.load(SeqCst)));
+        seed_automatic_groups(yaml, fresh.map(|values| &values.results))
+    }
+
+    fn reload_config(&self, ctl: u16, secret: &str, yaml: &str) -> Result<(), String> {
+        let (yaml, selections) = self.measured_config(yaml)?;
+        self.api(
+            ctl,
+            secret,
+            "PUT",
+            "/configs?force=false",
+            Some(json!({"payload":yaml})),
+            10,
+        )?;
+        self.restore_selections(ctl, secret, selections)
+    }
+
+    fn restore_selections(
+        &self,
+        ctl: u16,
+        secret: &str,
+        selections: Vec<(String, String)>,
+    ) -> Result<(), String> {
+        if selections.is_empty() {
+            return Ok(());
+        }
+        let snapshot = self.api(ctl, secret, "GET", "/proxies", None, 4)?;
+        for (group, member) in selections {
+            if !selection_available(&snapshot, &group, &member) {
+                continue;
+            }
+            self.api(
+                ctl,
+                secret,
+                "PUT",
+                &format!("/proxies/{}", enc(&group)),
+                Some(json!({"name":member})),
+                2,
+            )?;
+        }
+        Ok(())
+    }
+
     fn measure_proxy(&self, ctl: u16, secret: &str, name: &str) -> Value {
         for url in [
             "https://www.gstatic.com/generate_204",
@@ -1171,23 +1274,21 @@ impl Engine {
             .filter_map(Value::as_str)
             .map(str::to_string)
             .collect();
-        let mut pending = visible.clone();
+        let mut pending = visible;
         let mut seen = std::collections::HashSet::new();
         let mut leaves = Vec::new();
+        let mut groups = Vec::new();
         while let Some(name) = pending.pop() {
             if !seen.insert(name.clone()) {
                 continue;
             }
             if let Some(members) = all[&name]["all"].as_array() {
+                groups.push(name.clone());
                 pending.extend(members.iter().filter_map(Value::as_str).map(str::to_string));
             } else {
                 leaves.push(name);
             }
         }
-        let groups: Vec<_> = visible
-            .into_iter()
-            .filter(|name| all[name]["all"].is_array())
-            .collect();
         let results = Mutex::new(HashMap::new());
         // Test each leaf once; slow hosts do not hold up the next available worker.
         for targets in [&leaves, &groups] {
@@ -1231,9 +1332,10 @@ impl Engine {
         if self.closing.load(SeqCst) || self.gen.load(SeqCst) != generation {
             return Err("Test cancelled.".into());
         }
-        let results = results.into_inner().unwrap();
-        let mut result =
-            proxy_snapshot(&self.api(ctl, &secret, "GET", "/proxies", None, 4)?, &main);
+        let mut results = results.into_inner().unwrap();
+        let refreshed = self.api(ctl, &secret, "GET", "/proxies", None, 4)?;
+        record_group_members(&refreshed, &mut results);
+        let mut result = proxy_snapshot(&refreshed, &main);
         apply_url_measurements(&mut result, Some(&results));
         self.order_nodes(&mut result);
         let mut saved = self.latency.lock().unwrap();
@@ -1241,6 +1343,26 @@ impl Engine {
             return Err("Test cancelled.".into());
         }
         *saved = Some(Latency { revision, results });
+        drop(saved);
+        let st = self.st.lock().unwrap();
+        if self.gen.load(SeqCst) != generation || self.profile_revision.load(SeqCst) != revision {
+            return Err("Test cancelled.".into());
+        }
+        if let Some(run) = &st.run {
+            let cfg = data_dir().join("core/config.yaml");
+            let yaml = std::fs::read_to_string(&cfg).map_err(|e| e.to_string())?;
+            if let Err(error) = self.reload_config(run.ctl, &run.secret, &yaml) {
+                self.api(
+                    run.ctl,
+                    &run.secret,
+                    "PUT",
+                    "/configs?force=false",
+                    Some(json!({"payload":yaml})),
+                    10,
+                )?;
+                return Err(error);
+            }
+        }
         Ok(result)
     }
 
@@ -1257,20 +1379,7 @@ impl Engine {
                 break;
             };
             let tick_start = Instant::now();
-            let sample = (|| -> Result<Value, String> {
-                let response = self
-                    .local
-                    .get(&format!("http://127.0.0.1:{ctl}/traffic"))
-                    .set("Authorization", &format!("Bearer {secret}"))
-                    .timeout(Duration::from_secs(2))
-                    .call()
-                    .map_err(|e| e.to_string())?;
-                let mut line = String::new();
-                std::io::BufReader::new(response.into_reader())
-                    .read_line(&mut line)
-                    .map_err(|e| e.to_string())?;
-                serde_json::from_str(&line).map_err(|e| e.to_string())
-            })();
+            let sample = self.api(ctl, &secret, "GET", "/traffic", None, 2);
             match sample {
                 Ok(v) => {
                     misses = 0;
@@ -1330,6 +1439,61 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn restoring_choices_skips_removed_or_renamed_profile_and_provider_members() {
+        let snapshot = json!({"proxies":{
+            "Main":{"all":["Replacement","Auto"]},
+            "Auto":{"all":["New provider member"]}
+        }});
+        assert!(!selection_available(&snapshot, "Main", "Removed server"));
+        assert!(!selection_available(
+            &snapshot,
+            "Auto",
+            "Old provider member"
+        ));
+        assert!(!selection_available(
+            &snapshot,
+            "Removed group",
+            "Replacement"
+        ));
+        assert!(selection_available(&snapshot, "Main", "Replacement"));
+        assert!(selection_available(
+            &snapshot,
+            "Auto",
+            "New provider member"
+        ));
+    }
+    #[test]
+    fn nested_automatic_group_selects_its_direct_member() {
+        let all = json!({
+            "Outer":{"type":"URLTest","now":"Inner","all":["Inner"]},
+            "Inner":{"type":"URLTest","now":"Live","all":["Live"]},
+            "Live":{"type":"Vless"}
+        });
+        let measured = HashMap::from([
+            ("Outer".to_string(), json!({"status":"failed"})),
+            ("Inner".to_string(), json!({"status":"failed"})),
+            (
+                "Live".to_string(),
+                json!({"status":"ok","delay":21,"url":"https://www.gstatic.com/generate_204"}),
+            ),
+        ]);
+        let health = node_health(
+            "Outer",
+            &all,
+            &mut std::collections::HashSet::new(),
+            Some(&measured),
+        );
+        assert_eq!(health["now"], "Inner");
+        assert_eq!(health["status"], "ok");
+        let results = HashMap::from([("Outer".to_string(), health)]);
+        let (_, selections) = seed_automatic_groups(
+            "proxy-groups: [{name: Outer, type: url-test, proxies: [Inner]}]",
+            Some(&results),
+        )
+        .unwrap();
+        assert_eq!(selections, [("Outer".into(), "Inner".into())]);
+    }
     #[test]
     fn closing_a_connection_uses_its_core_id_and_leaves_other_sockets_alone() {
         let snapshot = json!({"connections":[
@@ -1437,6 +1601,63 @@ mod tests {
         assert_eq!(refreshed["nodes"][0]["delay"], 39);
     }
     #[test]
+    fn manual_success_seeds_automatic_health_url_and_member_only() {
+        let yaml = "proxy-groups:\n- {name: Estonia, type: url-test, proxies: [Dead, Live], url: 'https://health.invalid', expected-status: '200'}\n- {name: Manual, type: select, proxies: [Dead, Live]}\nrules: ['MATCH,Manual']\n";
+        let results = HashMap::from([
+            (
+                "Estonia".to_string(),
+                json!({"status":"ok","now":"Live","url":"https://cp.cloudflare.com/generate_204"}),
+            ),
+            (
+                "Manual".to_string(),
+                json!({"status":"ok","now":"Live","url":"https://cp.cloudflare.com/generate_204"}),
+            ),
+        ]);
+        let (seeded, selections) = seed_automatic_groups(yaml, Some(&results)).unwrap();
+        let value: serde_yaml::Value = serde_yaml::from_str(&seeded).unwrap();
+        assert_eq!(
+            value["proxy-groups"][0]["url"].as_str(),
+            Some("https://cp.cloudflare.com/generate_204")
+        );
+        assert_eq!(
+            value["proxy-groups"][0]["expected-status"].as_str(),
+            Some("204")
+        );
+        assert_eq!(value["proxy-groups"][0]["type"].as_str(), Some("url-test"));
+        assert!(value["proxy-groups"][1]["url"].is_null());
+        assert_eq!(value["rules"][0].as_str(), Some("MATCH,Manual"));
+        assert_eq!(selections, [("Estonia".to_string(), "Live".to_string())]);
+        assert_eq!(
+            seed_automatic_groups(yaml, None).unwrap(),
+            (yaml.to_string(), vec![])
+        );
+        let failed = HashMap::from([(
+            "Estonia".to_string(),
+            json!({"status":"failed","now":"Live","url":"https://cp.cloudflare.com/generate_204"}),
+        )]);
+        assert_eq!(
+            seed_automatic_groups(yaml, Some(&failed)).unwrap(),
+            (yaml.to_string(), vec![])
+        );
+    }
+    #[test]
+    fn direct_group_success_records_real_member_and_keeps_measured_fallback() {
+        let snapshot = json!({"proxies":{
+            "Direct":{"type":"URLTest","now":"Current"},
+            "Fallback":{"type":"URLTest","now":"Dead"},
+            "Manual":{"type":"Selector","now":"Current"}
+        }});
+        let mut results = HashMap::from([
+            ("Direct".to_string(), json!({"status":"ok"})),
+            ("Fallback".to_string(), json!({"status":"ok","now":"Live"})),
+            ("Manual".to_string(), json!({"status":"ok"})),
+        ]);
+        record_group_members(&snapshot, &mut results);
+        assert_eq!(results["Direct"]["now"], "Current");
+        assert_eq!(results["Fallback"]["now"], "Live");
+        assert!(results["Manual"].get("now").is_none());
+    }
+    #[test]
     fn automatic_group_keeps_the_only_fresh_working_member_when_its_probe_fails() {
         let all = json!({
             "Estonia":{"type":"URLTest","now":"LTE 1","all":["LTE 1","LTE 2","LTE 3","LTE 4"],"testUrl":"https://speed.cloudflare.com/__down?bytes=50000"},
@@ -1538,6 +1759,16 @@ mod tests {
     #[test]
     #[ignore = "Requires administrator consent; creates a real Windows TUN adapter"]
     fn windows_tun_smoke() {
+        tun_smoke(false);
+    }
+
+    #[test]
+    #[ignore = "Requires administrator access; verifies real automatic Windows TUN routing"]
+    fn windows_tun_auto_route_smoke() {
+        tun_smoke(true);
+    }
+
+    fn tun_smoke(automatic: bool) {
         use std::io::{Read, Write};
         use std::net::{TcpListener, TcpStream, UdpSocket};
         assert!(is_admin(), "Run this check as administrator");
@@ -1633,41 +1864,43 @@ mod tests {
         assert!(tun_ready());
         println!("TUN connected in {} ms", result["ms"]);
         let (ctl, secret, _, _) = engine.running().unwrap();
-        // The other VPN's DNS-leak filter owns port 53. Exercise our DNS interception on an isolated test port.
-        let cfg = data_dir().join("core/config.yaml");
-        let mut test_config: serde_yaml::Value =
-            serde_yaml::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
-        test_config["tun"]["dns-hijack"] =
-            serde_yaml::from_str("['203.0.113.53:5353', 'any:53', 'tcp://any:53']").unwrap();
-        std::fs::write(&cfg, serde_yaml::to_string(&test_config).unwrap()).unwrap();
-        engine
-            .api(
-                ctl,
-                &secret,
-                "PATCH",
-                "/configs",
-                Some(json!({"tun":{"enable":false}})),
-                3,
-            )
-            .unwrap();
-        engine
-            .api(
-                ctl,
-                &secret,
-                "PUT",
-                "/configs?force=true",
-                Some(json!({"path":cfg.to_string_lossy()})),
-                5,
-            )
-            .unwrap();
-        // Pin only documentation addresses to our test adapter; the user's other VPN stays untouched.
-        let route = Command::new("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command", "New-NetRoute -DestinationPrefix '203.0.113.0/24' -InterfaceAlias 'akimov' -NextHop '198.19.0.2' -RouteMetric 0 -PolicyStore ActiveStore -ErrorAction Stop | Out-Null"])
-            .creation_flags(0x0800_0000).output().unwrap();
-        assert!(
-            route.status.success(),
-            "Could not route the test fixture: {}",
-            String::from_utf8_lossy(&route.stderr)
-        );
+        if !automatic {
+            // The other VPN's DNS-leak filter owns port 53. Exercise our DNS interception on an isolated test port.
+            let cfg = data_dir().join("core/config.yaml");
+            let mut test_config: serde_yaml::Value =
+                serde_yaml::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+            test_config["tun"]["dns-hijack"] =
+                serde_yaml::from_str("['203.0.113.53:5353', 'any:53', 'tcp://any:53']").unwrap();
+            std::fs::write(&cfg, serde_yaml::to_string(&test_config).unwrap()).unwrap();
+            engine
+                .api(
+                    ctl,
+                    &secret,
+                    "PATCH",
+                    "/configs",
+                    Some(json!({"tun":{"enable":false}})),
+                    3,
+                )
+                .unwrap();
+            engine
+                .api(
+                    ctl,
+                    &secret,
+                    "PUT",
+                    "/configs?force=true",
+                    Some(json!({"path":cfg.to_string_lossy()})),
+                    5,
+                )
+                .unwrap();
+            // Pin only documentation addresses to our test adapter; the user's other VPN stays untouched.
+            let route = Command::new("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command", "New-NetRoute -DestinationPrefix '203.0.113.0/24' -InterfaceAlias 'akimov' -NextHop '198.19.0.2' -RouteMetric 0 -PolicyStore ActiveStore -ErrorAction Stop | Out-Null"])
+                .creation_flags(0x0800_0000).output().unwrap();
+            assert!(
+                route.status.success(),
+                "Could not route the test fixture: {}",
+                String::from_utf8_lossy(&route.stderr)
+            );
+        }
         engine
             .api(
                 ctl,
@@ -1709,7 +1942,15 @@ mod tests {
         query.extend_from_slice(&[0, 0, 1, 0, 1]);
         let dns = UdpSocket::bind("0.0.0.0:0").unwrap();
         dns.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        dns.send_to(&query, "203.0.113.53:5353").unwrap();
+        dns.send_to(
+            &query,
+            if automatic {
+                "203.0.113.53:53"
+            } else {
+                "203.0.113.53:5353"
+            },
+        )
+        .unwrap();
         let n = dns.recv(&mut packet).unwrap_or_else(|e| {
             panic!(
                 "DNS failed: {e}; log: {}",
