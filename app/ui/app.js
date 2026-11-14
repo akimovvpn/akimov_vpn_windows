@@ -396,7 +396,7 @@ function rowHTML(c){
     <div class="route ${routeClass(c)}">${esc(routeText(c))}</div>
     <div class="bwrap"><span class="badge o-${c.origin} ${routeClass(c)}" title="Matched ${originWord[c.origin]}"><i class="dot"></i><span>${esc(badgeText(c))}</span></span></div>
     <div class="rate"><span data-k="dn">↓ ${rate(c.dn)}</span><br><span data-k="up">↑ ${rate(c.up)}</span></div>
-    <div class="acts" role="group" aria-label="Quick rule for ${esc(c.host)}">${[["@direct","Direct","Always direct"],["@proxy","Via VPN","Always via VPN"],["@block","Block","Always block"]].map(([t,l,full])=>`<button class="btn sm ${has(t)?"":"quiet"}" data-act="quick" data-id="${c.id}" data-v="${t}" title="${full}" aria-label="${full}">${has(t)?ic("check","s"):""}${l}</button>`).join("")}</div>${S.scopeFor&&S.scopeFor.id===c.id?scopeHTML(c):""}`;
+    <div class="acts" role="group" aria-label="Connection actions for ${esc(c.host)}">${[["@direct","Direct","Always direct"],["@proxy","Via VPN","Always via VPN"],["@block","Block","Always block"]].map(([t,l,full])=>`<button class="btn sm ${has(t)?"":"quiet"}" data-act="quick" data-id="${c.id}" data-v="${t}" title="${full}" aria-label="${full}">${has(t)?ic("check","s"):""}${l}</button>`).join("")}<button class="btn sm quiet" data-act="conn-close" data-id="${c.id}" title="Close connection" aria-label="Close connection to ${esc(c.host)}">${ic("x","s")}</button></div>${S.scopeFor&&S.scopeFor.id===c.id?scopeHTML(c):""}`;
 }
 function scopeOptions(c){
   if(isIP(c.host))return[["IP-CIDR",c.host+"/32","this address"],["PROCESS-NAME",c.proc,"everything from "+c.proc]];
@@ -416,10 +416,10 @@ function syncConns(force){
  for(const[id,el]of connEls)if(!active.has(id)){el.remove();connEls.delete(id)}
  for(const group of groups){
   let block=processEls.get(group.key);
-  if(!block){if(busy){pending+=group.connections.length;continue}const details=document.createElement('details');details.className='process-group';details.open=true;const summary=document.createElement('summary');summary.className='process-summary';const rows=document.createElement('div');rows.className='process-connections';rows.setAttribute('role','list');details.append(summary,rows);list.append(details);block={details,summary,rows};processEls.set(group.key,block)}
+  if(!block){if(busy){pending+=group.connections.length;continue}const details=document.createElement('details');details.className='process-group';details.open=false;const summary=document.createElement('summary');summary.className='process-summary';summary.innerHTML=`<span class="grow">${esc(group.name)}</span><span class="cap dim" data-k="count"></span><span class="mono dim" data-k="rate"></span><button class="btn sm quiet" data-act="conn-close" data-process="${esc(group.key)}" aria-label="Close all connections for ${esc(group.name)}">Close all</button>`;const rows=document.createElement('div');rows.className='process-connections';rows.setAttribute('role','list');details.append(summary,rows);list.append(details);block={details,summary,rows};processEls.set(group.key,block)}
   const shown=group.connections.filter(visible);block.details.hidden=!shown.length;
-  block.summary.innerHTML=`<span class="grow">${esc(group.name)}</span><span class="cap dim">${shown.length} connections</span><span class="mono dim">↓ ${rate(group.dn)} · ↑ ${rate(group.up)}</span>`;
-  for(const c of group.connections){let el=connEls.get(c.id);if(!el){if(busy){pending++;continue}el=document.createElement('div');el.className='conn'+(force?'':' new');el.setAttribute('role','listitem');el.dataset.id=c.id;el.innerHTML=rowHTML(c);block.rows.append(el);connEls.set(c.id,el)}else if(c.dirty){el.innerHTML=rowHTML(c);const badge=$('.badge',el);if(badge)badge.classList.add('flash')}else{const dn=$('[data-k="dn"]',el),up=$('[data-k="up"]',el);if(dn)dn.textContent='↓ '+rate(c.dn);if(up)up.textContent='↑ '+rate(c.up)}if(el.parentElement!==block.rows)block.rows.append(el);c.dirty=false;el.hidden=!visible(c)}
+  $('[data-k="count"]',block.summary).textContent=shown.length+" connections";$('[data-k="rate"]',block.summary).textContent=`↓ ${rate(group.dn)} · ↑ ${rate(group.up)}`;
+  for(const c of group.connections){let el=connEls.get(c.id);if(!el){if(busy){pending++;continue}el=document.createElement('div');el.className='conn'+(force?'':' new');el.tabIndex=0;el.setAttribute('role','listitem');el.dataset.id=c.id;el.innerHTML=rowHTML(c);block.rows.append(el);connEls.set(c.id,el)}else if(c.dirty){el.innerHTML=rowHTML(c);const badge=$('.badge',el);if(badge)badge.classList.add('flash')}else{const dn=$('[data-k="dn"]',el),up=$('[data-k="up"]',el);if(dn)dn.textContent='↓ '+rate(c.dn);if(up)up.textContent='↑ '+rate(c.up)}if(el.parentElement!==block.rows)block.rows.append(el);c.dirty=false;el.hidden=!visible(c)}
  }
  const keys=new Set(groups.map(g=>g.key));for(const[key,block]of processEls)if(!keys.has(key)){block.details.remove();processEls.delete(key)}
  const np=$('#newpill');np.hidden=!pending;np.textContent=pending+' new';
@@ -498,6 +498,14 @@ const act={
   "go-devices":()=>{S.pendingSwitch=null;go("devices")},
   filter:el=>{S.filter=el.dataset.v;const s=el.parentElement,i=[...s.children].indexOf(el);s.dataset.i=i;s.style.setProperty("--i",i);mem.seg.filter=i;$$("button",s).forEach(b=>b.setAttribute("aria-pressed",b===el));syncConns(true)},
   pause:()=>{S.paused=!S.paused;rr()}, flush:()=>syncConns(true),
+  "conn-close":async el=>{
+    const process=el.dataset.process??null,c=S.conns.find(c=>c.id===+el.dataset.id);
+    if(process===null&&!c?.connectionId)return;
+    const ids=new Set(S.conns.filter(x=>process!==null?processName(x.proc).toLowerCase()===process:x.id===c.id).map(x=>x.id));
+    el.disabled=true;
+    try{await invoke("close_connections",{id:process===null?c.connectionId:null,process});S.conns=S.conns.filter(c=>!ids.has(c.id));if(ids.has(S.scopeFor?.id))S.scopeFor=null;syncConns(true)}
+    finally{el.disabled=false}
+  },
   quick:el=>{const c=S.conns.find(x=>x.id===+el.dataset.id);if(!c)return;
     if(c.origin==="user"&&c.rule.target===el.dataset.v){go("rules");toast("This rule already sends it "+TARGET[c.rule.target][0].toLowerCase()+".");return}
     S.scopeFor={id:c.id,target:el.dataset.v,i:0};connEls.get(c.id).innerHTML=rowHTML(c);$("#scopeadd").focus()},
@@ -525,7 +533,7 @@ const act={
   "dev-edit":el=>{if(S.deviceBusy)return;S.edit="d"+el.dataset.id;rr()}, "dev-ask":el=>{if(S.deviceBusy)return;S.edit="x"+el.dataset.id;rr()},
 
 };
-document.addEventListener("click",e=>{for(const picker of $$(".rule-types[open]"))if(!picker.contains(e.target))picker.open=false;const el=e.target.closest("[data-act]");if(el?.tagName==="A")e.preventDefault();if(el&&!el.disabled&&act[el.dataset.act])Promise.resolve().then(()=>{if(S.pay?.busy&&el.closest("#sheet"))return;return act[el.dataset.act](el,e)}).catch(report)});
+document.addEventListener("click",e=>{for(const picker of $$(".rule-types[open]"))if(!picker.contains(e.target))picker.open=false;const el=e.target.closest("[data-act]");if(el?.tagName==="A"||el?.dataset.act==="conn-close")e.preventDefault();if(el&&!el.disabled&&act[el.dataset.act])Promise.resolve().then(()=>{if(S.pay?.busy&&el.closest("#sheet"))return;return act[el.dataset.act](el,e)}).catch(report)});
 document.addEventListener("input",e=>{const t=e.target;if(t.id==="cval"||t.id==="rawv"){S.comp.value=t.value;showMsg()}if(t.id==="q"){S.q=t.value;syncConns(true)}});
 document.addEventListener("keydown",e=>{
   const t=e.target;
@@ -913,7 +921,7 @@ async function boot(){
   await window.__TAURI__.event.listen("tick",({payload:p})=>{
     S.secs=p.secs;S.dn=p.dn;S.up=p.up;
     [["#timer",clock(p.secs)],["#bt",clock(p.secs)],["#dn",rate(p.dn)],["#up",rate(p.up)],["#bdn",rate(p.dn)],["#bup",rate(p.up)]].forEach(([selector,value])=>{const el=$(selector);if(el)el.textContent=value});
-    if(p.conns&&!S.paused){const counts=new Map();const previous=new Map(S.conns.map(c=>[c.id,c]));S.conns=p.conns.map(c=>{const signature=JSON.stringify([c.host,c.port,c.proc,c.chains]),i=counts.get(signature)||0;counts.set(signature,i+1);const key=c.id||signature+":"+i;let id=trafficIds.get(key);if(!id){id=++uid;trafficIds.set(key,id)}const target=(c.chains||[]).some(n=>/reject|block/i.test(n))?"@block":(c.chains||[]).some(n=>/^direct$/i.test(n))?"@direct":"@proxy";const own=S.rules.find(r=>r.on&&r.type.replace(/[-_]/g,"").toUpperCase()===(c.rule||"").replace(/[-_]/g,"").toUpperCase()&&r.value===c.payload);return{...c,host:c.host||"",proc:c.proc||"",id,route:TARGET[target][1],origin:own?"user":c.rule==="Match"||c.rule==="MATCH"?"default":"plan",rule:c.rule&&c.rule.toUpperCase()!=="MATCH"?{type:c.rule,value:c.payload||"",target}:null,dirty:!previous.has(id)||previous.get(id).route!==TARGET[target][1]||previous.get(id).rule?.value!==(c.payload||"")}});const ids=new Set(S.conns.map(c=>c.id));for(const[id,el]of connEls)if(!ids.has(id)){collapse(el,()=>el.remove());connEls.delete(id)}if(trafficIds.size>1000)for(const[key,id]of trafficIds)if(!ids.has(id))trafficIds.delete(key);if(S.screen==="conns")syncConns()}
+    if(p.conns&&!S.paused){const counts=new Map();const previous=new Map(S.conns.map(c=>[c.id,c]));S.conns=p.conns.map(c=>{const signature=JSON.stringify([c.host,c.port,c.proc,c.chains]),i=counts.get(signature)||0;counts.set(signature,i+1);const key=c.id||signature+":"+i;let id=trafficIds.get(key);if(!id){id=++uid;trafficIds.set(key,id)}const target=(c.chains||[]).some(n=>/reject|block/i.test(n))?"@block":(c.chains||[]).some(n=>/^direct$/i.test(n))?"@direct":"@proxy";const own=S.rules.find(r=>r.on&&r.type.replace(/[-_]/g,"").toUpperCase()===(c.rule||"").replace(/[-_]/g,"").toUpperCase()&&r.value===c.payload);return{...c,connectionId:c.id,host:c.host||"",proc:c.proc||"",id,route:TARGET[target][1],origin:own?"user":c.rule==="Match"||c.rule==="MATCH"?"default":"plan",rule:c.rule&&c.rule.toUpperCase()!=="MATCH"?{type:c.rule,value:c.payload||"",target}:null,dirty:!previous.has(id)||previous.get(id).route!==TARGET[target][1]||previous.get(id).rule?.value!==(c.payload||"")}});const ids=new Set(S.conns.map(c=>c.id));for(const[id,el]of connEls)if(!ids.has(id)){collapse(el,()=>el.remove());connEls.delete(id)}if(trafficIds.size>1000)for(const[key,id]of trafficIds)if(!ids.has(id))trafficIds.delete(key);if(S.screen==="conns")syncConns()}
   });
   await window.__TAURI__.event.listen("update-available",({payload})=>{if(S.update.state==="installing")return;S.update={state:"available",version:String(payload?.version||"")};paintScreen("settings");toast("Version "+S.update.version+" is available.",[["Install",()=>act["update-install"]().catch(report)]])});
   await window.__TAURI__.event.listen("tray-toggle",()=>{toggle().catch(report)});

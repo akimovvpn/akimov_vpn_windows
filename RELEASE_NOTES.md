@@ -1,8 +1,9 @@
-akimov vpn 1.0.9 for Windows 10/11 x64.
+akimov vpn 1.0.10 for Windows 10/11 x64.
 
-- Automatic groups show a working member's fresh latency when the other members or the group probe fail. A group with four hosts and one working host no longer incorrectly reports timeout.
-- The mihomo URL-test selector drops a cached dead choice when a healthy member is available for the group's configured health URL, without waiting for the ten-second selection cache. Healthy selections keep the configured tolerance.
-- Manual selectors still report failure for the chosen dead server. Groups with no working members still report failure.
+- Connecting finishes as soon as the local VPN core and TUN adapter or system proxy are ready. Server ping and external website checks no longer delay or reject a connection. An unreachable server can show Connected but cannot carry traffic.
+- Manual ping results stay for the app session until you test again. Connecting, disconnecting, reopening the picker and refreshing an unchanged subscription preserve them; a changed profile or quitting clears them.
+- Connections are grouped by process and start collapsed. Expand only the processes you need; live updates preserve your choice.
+- Close an individual connection from its row, or use Close all on a process header to close that process's current connections, including connections beyond the displayed list. Applications can reconnect afterward.
 
 Choose setup.exe to install, or extract the portable ZIP with its core folder. In-app updates need the installed version. The installer is not code-signed for Windows SmartScreen; update packages are signed and verified by the app. Your other VPN is not disabled by this update.
 

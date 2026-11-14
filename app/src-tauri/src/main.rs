@@ -407,6 +407,10 @@ fn set_close_to_tray(e: Eng, on: bool) -> Result<Value, String> {
 }
 
 #[tauri::command(async)]
+fn close_connections(e: Eng, id: Option<String>, process: Option<String>) -> Result<Value, String> {
+    e.close_connections(id, process)
+}
+#[tauri::command(async)]
 fn watch(e: Eng, on: bool) -> Result<(), String> {
     e.watch(on);
     Ok(())
@@ -452,6 +456,7 @@ fn main() {
             refresh_subscription,
             connect,
             disconnect,
+            close_connections,
             proxies,
             select_node,
             test_latency,

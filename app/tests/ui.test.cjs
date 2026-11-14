@@ -17,7 +17,7 @@ const me = {id:1,email:'fixture@example.invalid',balance:100000,discount:{percen
   {id:77,plan:'Fixture <plan>',tariff_id:2,status:'active',days_left:30,term_days:90,expires_at:'2027-01-01T00:00:00Z',traffic_gb:500,used_gb:125,devices:5,plan_devices:5,plan_traffic_gb:500,extra_device_price_kopecks:1500,extra_gb_price_kopecks:5000,addon_months_remaining:2,renew_price_per_30_kopecks:25001},
   {id:78,plan:'Second',tariff_id:2,status:'active',days_left:60,term_days:90,expires_at:'2027-02-01T00:00:00Z',traffic_gb:100,used_gb:0,devices:3}
 ]};
-let latencyWait=null,offline=false,telegramAnswers=false,deleteWait=null,buyTerminal=false,buyWait=null,connectWait=null,connectError=null,buyFails=1,promoFails=false,core={has_sub:true,connected:false,rules:[],mode:'tun',node:'Fixture <server>',hwid:'own/hwid',sub_id:77,version:'0.1.0'};
+let latencyWait=null,offline=false,telegramAnswers=false,deleteWait=null,buyTerminal=false,buyWait=null,connectWait=null,connectError=null,closeError=null,buyFails=1,promoFails=false,core={has_sub:true,connected:false,rules:[],mode:'tun',node:'Fixture <server>',hwid:'own/hwid',sub_id:77,version:'0.1.0'};
 const document={hidden:false,documentElement:element(),activeElement:element(),fonts:{ready:Promise.resolve()},querySelector:query,querySelectorAll:()=>[],createElement:element,addEventListener:(name,fn)=>(handlers[name]??=[]).push(fn)};
 const context = vm.createContext({document,window:{__TAURI__:{event:{listen:async(name,fn)=>events[name]=fn},core:{Channel:class {},invoke:async(name,args)=>{
   calls.push([name,args]);
@@ -29,6 +29,7 @@ const context = vm.createContext({document,window:{__TAURI__:{event:{listen:asyn
   if(name==='refresh_subscription')return {...core,profile:{title:'Fixture profile',total:0,upload:12,download:34,updated_at:1,update_hours:1}};
   if(name==='connect'){if(connectWait)return await connectWait;if(connectError)throw connectError;core.connected=true;return {ms:300}}
   if(name==='disconnect'){core.connected=false;return {ok:true}}
+  if(name==='close_connections'){if(closeError)throw closeError;return {ok:true}}
   if(name==='clear_subscription'){if(args?.expectedSubId&&args.expectedSubId!==core.sub_id)return {ok:true};core.has_sub=false;core.sub_id=null;return {ok:true}}
   if(name==='cabinet_use_subscription'){if(offline)throw 'Cabinet connection failed. Check your internet and API address.';core.sub_id=args.subId;core.has_sub=true;return {...core}}
   if(name==='test_latency'&&latencyWait)return latencyWait(args);
@@ -225,6 +226,16 @@ const flush = () => new Promise(resolve=>setImmediate(resolve));
   const revoke=calls.slice(marker).map(([name])=>name);assert.equal(revoke[0],'disconnect');assert(revoke.includes('clear_subscription'));
   run(`S.conn='connected';S.conns=[]`);await events.tick({payload:{secs:5,dn:2048,up:1024,conns:[{id:'real-socket',host:'example.invalid',port:443,proc:'fixture.exe',dn:2048,up:1024,chains:['DIRECT'],rule:'DomainSuffix',payload:'example.invalid'}]}});
   assert.equal(run('S.conns[0].route'),'direct');assert.equal(run('S.secs'),5);
+  assert.equal(run('S.conns[0].connectionId'),'real-socket','closing needs the core ID, not the numeric row ID');
+  const closeButton={dataset:{id:run('S.conns[0].id')},disabled:false};
+  closeError='Fixture close failure';await assert.rejects(run(`act['conn-close'](${JSON.stringify(closeButton)})`),/Fixture close failure/);closeError=null;
+  assert.equal(run('S.conns.length'),1,'a failed close keeps the connection visible');
+  await run(`act['conn-close'](${JSON.stringify(closeButton)})`);
+  assert.equal(JSON.stringify(calls.at(-1)),JSON.stringify(['close_connections',{id:'real-socket',process:null}]));assert.equal(run('S.conns.length'),0);
+  await events.tick({payload:{secs:6,dn:0,up:0,conns:[{id:'one',host:'one',proc:'Fixture.exe',chains:[]},{id:'two',host:'two',proc:'C:\\Apps\\fixture.exe',chains:[]},{id:'other',host:'other',proc:'other.exe',chains:[]}]}});
+  run('S.paused=true');await run(`act['conn-close']({dataset:{process:'fixture.exe'},disabled:false})`);
+  assert.equal(JSON.stringify(calls.at(-1)),JSON.stringify(['close_connections',{id:null,process:'fixture.exe'}]));assert.equal(run('S.conns.length'),1);assert.equal(run('S.conns[0].connectionId'),'other','closing a process leaves other processes alone');run('S.paused=false');
+
   await events.dropped();assert.equal(run('S.conn'),'idle');
   run('S.signed_in=false;S.screen="account"');assert.match(run('screens.account()'),/id="email"/);assert.doesNotMatch(run('screens.account()'),/API URL/);
   query('#email').value='fixture@example.invalid';query('#password').value='fixture-only-password';

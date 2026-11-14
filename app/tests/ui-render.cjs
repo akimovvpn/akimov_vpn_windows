@@ -60,9 +60,19 @@ async function screenshot(name){const r=await call('Page.captureScreenshot',{for
  await evaluate('window.fixtureLatency.resolve({now:S.node,nodes:[{name:S.node,delay:18,status:"ok",url:"https://example.invalid/check"},{name:"Slow",status:"failed"}]});window.latencyTest');
  assert.equal(await evaluate('S.testing'),false);assert.equal(await evaluate('document.querySelectorAll("[data-ms]")[1].textContent'),'Test failed');
 
- await evaluate(`S.sheet=null;renderSheet();S.screen='conns';S.conn='connected';S.conns=[{id:1,proc:'chrome.exe',host:'one.example',port:443,dn:1,up:0,route:'proxy',origin:'default',rule:null},{id:2,proc:'C:\\\\Apps\\\\chrome.exe',host:'two.example',port:443,dn:2,up:1,route:'proxy',origin:'default',rule:null},{id:3,proc:'Discord.exe',host:'three.example',port:443,dn:0,up:0,route:'direct',origin:'default',rule:null}];rr();syncConns(true);syncConns(true)`);
+ await evaluate(`S.sheet=null;renderSheet();S.screen='conns';S.conn='connected';S.conns=[{id:1,connectionId:'socket-one',proc:'chrome.exe',host:'one.example',port:443,dn:1,up:0,route:'proxy',origin:'default',rule:null},{id:2,connectionId:'socket-two',proc:'C:\\\\Apps\\\\chrome.exe',host:'two.example',port:443,dn:2,up:1,route:'proxy',origin:'default',rule:null},{id:3,connectionId:'socket-other',proc:'Discord.exe',host:'three.example',port:443,dn:0,up:0,route:'direct',origin:'default',rule:null}];rr();syncConns(true);syncConns(true)`);
  assert.equal(await evaluate('document.querySelectorAll(".process-group").length'),2);assert.equal(await evaluate('document.querySelectorAll(".process-group:first-child .conn").length'),2);
+ assert(await evaluate('[...document.querySelectorAll(".process-group")].every(g=>!g.open)'),"process groups start collapsed");
+ await evaluate('document.querySelector(".process-group").open=true;syncConns(true)');assert.equal(await evaluate('document.querySelector(".process-group").open'),true,"expanded groups stay open during updates");
  await evaluate('document.querySelector(".process-group").open=false;syncConns(true)');assert.equal(await evaluate('document.querySelector(".process-group").open'),false);await screenshot('traffic-processes');
+ await evaluate('document.querySelector(".process-group").open=true;document.querySelector(".conn").focus()');
+ assert.equal(await evaluate('getComputedStyle(document.querySelector(".conn .acts")).display'),'flex','keyboard focus reveals connection actions');await screenshot('traffic-expanded');
+ await evaluate('document.querySelector(".conn [data-act=conn-close]").click()');await wait(30);
+ assert.equal(await evaluate('S.conns.length'),2);assert.deepEqual(await evaluate('fixtureCalls.filter(c=>c.name==="close_connections").at(-1).args'),{id:'socket-one',process:null});
+ await evaluate('document.querySelector(".process-group").open=false;window.closeGroup=document.querySelector(".process-group");document.querySelector(".process-summary [data-act=conn-close]").focus();syncConns(true)');
+ assert(await evaluate('document.activeElement.matches(".process-summary [data-act=conn-close]")'),'live updates preserve focus on Close all');
+ await evaluate('document.activeElement.click()');await wait(30);
+ assert.equal(await evaluate('window.closeGroup.open'),false,'Close all does not expand the process');assert.equal(await evaluate('S.conns.length'),1);assert.equal(await evaluate('S.conns[0].proc'),'Discord.exe');
  await call('Page.navigate',{url:'http://127.0.0.1:'+port+'/?restorecheck=1'});await wait(500);
  assert.equal(await evaluate('S.restoring'),true);assert.equal(await evaluate('document.querySelector("form.auth")'),null,'saved-session startup must not flash a login form');assert(await evaluate('document.querySelector("#splash")!==null'),'the cabinet splash covers account restoration');
  assert(await evaluate('document.querySelector(".stage").inert'),'loading screens cannot receive keyboard input');

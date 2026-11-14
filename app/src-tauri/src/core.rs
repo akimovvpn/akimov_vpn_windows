@@ -113,12 +113,11 @@ struct St {
 
 struct Latency {
     revision: u64,
-    checked: Instant,
     results: HashMap<String, Value>,
 }
 impl Latency {
     fn fresh(&self, revision: u64) -> bool {
-        self.revision == revision && self.checked.elapsed() < Duration::from_secs(60)
+        self.revision == revision
     }
 }
 
@@ -232,6 +231,38 @@ fn enc(s: &str) -> String {
             }
         })
         .collect()
+}
+
+fn connection_ids(
+    snapshot: &Value,
+    id: Option<&str>,
+    process: Option<&str>,
+) -> Result<Vec<String>, String> {
+    match (id, process) {
+        (Some(id), None) if !id.is_empty() => {}
+        (None, Some(process)) if !process.is_empty() => {}
+        _ => return Err("Choose a connection or process to close.".into()),
+    }
+    let connections = snapshot["connections"]
+        .as_array()
+        .ok_or("Could not read the core's connections.")?;
+    Ok(connections
+        .iter()
+        .filter(|c| {
+            if let Some(id) = id {
+                return c["id"] == id;
+            }
+            let name = c["metadata"]["process"]
+                .as_str()
+                .unwrap_or("")
+                .rsplit(['\\', '/'])
+                .next()
+                .filter(|name| !name.is_empty())
+                .unwrap_or("Unknown process");
+            process.is_some_and(|process| name.to_lowercase() == process)
+        })
+        .filter_map(|c| c["id"].as_str().map(str::to_string))
+        .collect())
 }
 
 fn node_health(
@@ -545,7 +576,6 @@ impl Engine {
                 st.settings.mode == "tun",
             )?;
         }
-        self.invalidate_latency();
         let old_metadata = std::mem::replace(&mut st.settings.profile, metadata);
         let old_profile_hwid = std::mem::replace(&mut st.settings.profile_hwid, hwid);
         let temp = path.with_extension("tmp");
@@ -569,6 +599,9 @@ impl Engine {
                 )?;
             }
             return Err(error);
+        }
+        if text != old {
+            self.invalidate_latency();
         }
         if let (Some(run), Some(main)) = (st.run.as_mut(), main) {
             run.main = main;
@@ -596,10 +629,6 @@ impl Engine {
         self.ensure_profile_hwid()?;
         let (result, generation) = self.start_attempt(attempt)?;
         if let Some(gen) = generation {
-            if let Err(error) = self.verify_connection() {
-                let _ = self.stop(Some(gen));
-                return Err(error);
-            }
             if self.gen.load(SeqCst) != gen {
                 return Err("Connection cancelled.".into());
             }
@@ -607,48 +636,6 @@ impl Engine {
             std::thread::spawn(move || me.ticker(app, gen));
         }
         Ok(result)
-    }
-
-    fn verify_connection(&self) -> Result<(), String> {
-        let measured = self.test_latency(|_| {})?;
-        let selected = measured["now"].as_str().ok_or("vpn_unreachable")?;
-        if !measured["nodes"].as_array().is_some_and(|nodes| {
-            nodes
-                .iter()
-                .any(|node| node["name"] == selected && node["status"] == "ok")
-        }) {
-            return Err("vpn_unreachable".into());
-        }
-        let tun = self
-            .st
-            .lock()
-            .unwrap()
-            .run
-            .as_ref()
-            .is_some_and(|run| run.tun);
-        if tun {
-            let tls = native_tls::TlsConnector::new()
-                .map_err(|_| "Whole-device connection could not be checked.")?;
-            let agent = ureq::AgentBuilder::new()
-                .tls_connector(Arc::new(tls))
-                .try_proxy_from_env(false)
-                .timeout(Duration::from_secs(8))
-                .build();
-            if ![
-                "https://www.gstatic.com/generate_204",
-                "https://cp.cloudflare.com/generate_204",
-            ]
-            .iter()
-            .any(|url| {
-                agent
-                    .get(url)
-                    .call()
-                    .is_ok_and(|response| response.status() == 204)
-            }) {
-                return Err("tun_unreachable".into());
-            }
-        }
-        Ok(())
     }
 
     #[cfg(test)]
@@ -775,6 +762,28 @@ impl Engine {
     pub fn disconnect(&self) -> Result<Value, String> {
         self.gen.fetch_add(1, SeqCst);
         self.stop(None)
+    }
+
+    pub fn close_connections(
+        &self,
+        id: Option<String>,
+        process: Option<String>,
+    ) -> Result<Value, String> {
+        let Some((ctl, secret, _, _)) = self.running() else {
+            return Ok(json!({"ok": true}));
+        };
+        let snapshot = self.api(ctl, &secret, "GET", "/connections", None, 4)?;
+        for id in connection_ids(&snapshot, id.as_deref(), process.as_deref())? {
+            self.api(
+                ctl,
+                &secret,
+                "DELETE",
+                &format!("/connections/{}", enc(&id)),
+                None,
+                4,
+            )?;
+        }
+        Ok(json!({"ok": true}))
     }
 
     /// Local port of the running core, 0 when disconnected. Lets account requests fall back to the VPN route.
@@ -1231,11 +1240,7 @@ impl Engine {
         if self.profile_revision.load(SeqCst) != revision {
             return Err("Test cancelled.".into());
         }
-        *saved = Some(Latency {
-            revision,
-            checked: Instant::now(),
-            results,
-        });
+        *saved = Some(Latency { revision, results });
         Ok(result)
     }
 
@@ -1326,10 +1331,54 @@ impl Engine {
 mod tests {
     use super::*;
     #[test]
+    fn closing_a_connection_uses_its_core_id_and_leaves_other_sockets_alone() {
+        let snapshot = json!({"connections":[
+            {"id":"one","metadata":{"process":"chrome.exe"}},
+            {"id":"two","metadata":{"process":"chrome.exe"}}
+        ]});
+        assert_eq!(
+            connection_ids(&snapshot, Some("two"), None).unwrap(),
+            ["two"]
+        );
+        assert!(connection_ids(&snapshot, Some("already-closed"), None)
+            .unwrap()
+            .is_empty());
+    }
+    #[test]
+    fn closing_a_process_matches_the_group_beyond_the_display_limit() {
+        let mut connections: Vec<_> = (0..305)
+            .map(|id| json!({"id":id.to_string(),"metadata":{"process":"Chrome.exe"}}))
+            .collect();
+        connections.push(json!({"id":"path","metadata":{"process":"C:\\Apps\\chrome.exe"}}));
+        connections.push(json!({"id":"other","metadata":{"process":"chromedriver.exe"}}));
+        connections.push(json!({"id":"unknown","metadata":{}}));
+        let snapshot = json!({"connections":connections});
+        let ids = connection_ids(&snapshot, None, Some("chrome.exe")).unwrap();
+        assert_eq!(ids.len(), 306);
+        assert_eq!(ids[305], "path");
+        assert!(!ids.contains(&"other".to_string()));
+        assert_eq!(
+            connection_ids(&snapshot, None, Some("unknown process")).unwrap(),
+            ["unknown"]
+        );
+    }
+    #[test]
+    fn closing_connections_requires_one_explicit_target_and_a_valid_snapshot() {
+        let snapshot = json!({"connections":[]});
+        for (id, process) in [
+            (None, None),
+            (Some("one"), Some("chrome.exe")),
+            (Some(""), None),
+            (None, Some("")),
+        ] {
+            assert!(connection_ids(&snapshot, id, process).is_err());
+        }
+        assert!(connection_ids(&json!({}), Some("one"), None).is_err());
+    }
+    #[test]
     fn latency_from_a_previous_profile_is_never_reused() {
         let old = Latency {
             revision: 1,
-            checked: Instant::now(),
             results: HashMap::new(),
         };
         assert!(old.fresh(1));
