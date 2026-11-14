@@ -12,14 +12,22 @@ pub struct Rule {
     pub on: bool,
 }
 
-/// Only these keys are taken from a subscription. Ports, controller, DNS and TUN stay ours.
-const KEEP: [&str; 6] = [
+/// Preserve profile routing, DNS and transport behavior; local listeners and TUN ownership stay ours.
+const KEEP: [&str; 14] = [
     "proxies",
     "proxy-groups",
     "proxy-providers",
     "rules",
     "rule-providers",
     "sub-rules",
+    "dns",
+    "hosts",
+    "ipv6",
+    "sniffer",
+    "global-client-fingerprint",
+    "tcp-concurrent",
+    "unified-delay",
+    "keep-alive-interval",
 ];
 const SYSTEM_RULES: [&str; 4] = [
     "DOMAIN-SUFFIX,local,DIRECT",
@@ -362,9 +370,11 @@ pub fn build(
     out.insert("bind-address".into(), "127.0.0.1".into());
     out.insert("mode".into(), "rule".into());
     out.insert("log-level".into(), "warning".into());
-    out.insert("ipv6".into(), Value::from(tun));
+    let ipv6 = sub["ipv6"].as_bool().unwrap_or(tun);
+    out.insert("ipv6".into(), Value::from(ipv6));
     out.insert("unified-delay".into(), Value::from(true));
-    out.insert("tcp-concurrent".into(), Value::from(true));
+    out.entry(Value::from("tcp-concurrent"))
+        .or_insert(Value::from(true));
     out.insert("find-process-mode".into(), "strict".into());
     out.insert(
         "external-controller".into(),
@@ -374,16 +384,36 @@ pub fn build(
     let mut profile = Mapping::new();
     profile.insert("store-selected".into(), Value::from(true));
     out.insert("profile".into(), Value::Mapping(profile));
-    let mut dns: Value = serde_yaml::from_str("enable: true\nrespect-rules: true\ndefault-nameserver: [1.1.1.1, 8.8.8.8]\nproxy-server-nameserver: ['https://1.1.1.1/dns-query', 'https://8.8.8.8/dns-query']\nnameserver: ['https://1.1.1.1/dns-query', 'https://8.8.8.8/dns-query']\n").map_err(|e| e.to_string())?;
-    dns["ipv6"] = Value::from(tun);
-    dns["enhanced-mode"] = Value::from(if tun { "fake-ip" } else { "redir-host" });
-    if tun {
+    let defaults: Value = serde_yaml::from_str("enable: true\nrespect-rules: false\ndefault-nameserver: [1.1.1.1, 8.8.8.8]\nproxy-server-nameserver: ['https://1.1.1.1/dns-query', 'https://8.8.8.8/dns-query']\nnameserver: ['https://1.1.1.1/dns-query', 'https://8.8.8.8/dns-query']\n").map_err(|e| e.to_string())?;
+    let mut dns = sub.get("dns").cloned().unwrap_or_else(|| defaults.clone());
+    let values = dns.as_mapping_mut().ok_or("Invalid DNS configuration.")?;
+    for (key, value) in defaults.as_mapping().unwrap() {
+        values.entry(key.clone()).or_insert_with(|| value.clone());
+    }
+    // DNS interception serves the owned adapter; do not bind a subscription's extra local port.
+    values.remove(Value::from("listen"));
+    values
+        .entry(Value::from("ipv6"))
+        .or_insert(Value::from(ipv6));
+    values
+        .entry(Value::from("enhanced-mode"))
+        .or_insert(Value::from(if tun { "fake-ip" } else { "redir-host" }));
+    if tun && dns["enhanced-mode"].as_str() == Some("fake-ip") {
         dns["fake-ip-range"] = Value::from("198.19.0.1/16");
     }
     out.insert("dns".into(), dns);
-    let tunnel: Value = serde_yaml::from_str(if tun {
+    let mut tunnel: Value = serde_yaml::from_str(if tun {
         "enable: true\ndevice: akimov\nstack: mixed\nauto-route: true\nauto-detect-interface: true\nstrict-route: true\nmtu: 1500\ninet6-address: ['fdfe:dcba:9877::1/126']\ndns-hijack: ['any:53', 'tcp://any:53']\n"
     } else { "enable: false" }).map_err(|e| e.to_string())?;
+    if tun {
+        tunnel["inet4-address"] = serde_yaml::from_str("['198.19.0.1/30']").unwrap();
+    }
+    if !ipv6 {
+        tunnel
+            .as_mapping_mut()
+            .unwrap()
+            .remove(Value::from("inet6-address"));
+    }
     out.insert("tun".into(), tunnel);
 
     let nodes = names(sub, "proxies").len();
@@ -504,6 +534,10 @@ pub fn privileged_config(yaml: &str, ctl: u16, secret: &str) -> Result<String, S
             continue;
         };
         let valid = match key {
+            "dns" | "hosts" | "sniffer" => value.is_mapping(),
+            "ipv6" | "tcp-concurrent" | "unified-delay" => value.is_bool(),
+            "global-client-fingerprint" => value.is_string(),
+            "keep-alive-interval" => value.as_u64().is_some(),
             "proxies" | "proxy-groups" => value.as_sequence().is_some_and(|items| {
                 items.iter().all(|item| {
                     item.is_mapping() && item["name"].is_string() && item["type"].is_string()
@@ -602,6 +636,30 @@ pub fn privileged_config(yaml: &str, ctl: u16, secret: &str) -> Result<String, S
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn subscription_dns_and_transport_settings_survive_the_helper_rebuild() {
+        let sub = parse("proxies: [{name: Estonia, type: direct}]\nipv6: false\nhosts: {gateway.example: 203.0.113.1}\nglobal-client-fingerprint: firefox\ntcp-concurrent: false\ndns:\n  enable: true\n  listen: 127.0.0.1:1053\n  ipv6: false\n  respect-rules: false\n  enhanced-mode: fake-ip\n  fake-ip-range: 198.18.0.1/16\n  default-nameserver: ['tcp://77.88.8.8']\n  nameserver: ['https://8.8.8.8/dns-query']\n  proxy-server-nameserver: ['https://common.dot.dns.yandex.net/dns-query']\n  nameserver-policy: {'+.ru': ['tcp://77.88.8.8']}\n  fake-ip-filter: ['stun.*.*', 'time.windows.com']\n").unwrap();
+        let built = build(&sub, &[], 1111, 2222, "secret", true).unwrap();
+        let helper = privileged_config(&built.yaml, 3333, "private").unwrap();
+        let mut expected_dns = sub["dns"].clone();
+        expected_dns
+            .as_mapping_mut()
+            .unwrap()
+            .remove(Value::from("listen"));
+        expected_dns["fake-ip-range"] = Value::from("198.19.0.1/16");
+        for yaml in [&built.yaml, &helper] {
+            let value: Value = serde_yaml::from_str(yaml).unwrap();
+            assert_eq!(value["dns"], expected_dns);
+            for key in [
+                "hosts",
+                "ipv6",
+                "global-client-fingerprint",
+                "tcp-concurrent",
+            ] {
+                assert_eq!(value[key], sub[key], "{key}");
+            }
+        }
+    }
     #[test]
     fn proxy_and_latency_use_core_dns_without_changing_system_dns() {
         let sub =

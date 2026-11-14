@@ -22,7 +22,8 @@ function getThroughProxy(port,targetPort){return new Promise((resolve,reject)=>{
  for(const fingerprint of ['chrome','firefox']){
   const port=await freePort(),config={ 'mixed-port':port,'allow-lan':false,'log-level':'debug',proxies:[{name:'fixture',type:'vless',server:'127.0.0.1',port:xrayPort,uuid,network:'tcp',tls:true,flow:'xtls-rprx-vision',servername:'localhost','client-fingerprint':fingerprint,'reality-opts':{'public-key':publicKey,'short-id':'0123456789abcdef'}}],rules:['MATCH,fixture']};
   const file=path.join(dir,'mihomo-'+fingerprint+'.json');fs.writeFileSync(file,JSON.stringify(config));const mihomo=run(core,['-d',dir,'-f',file],fingerprint+'.log');await ready(port,mihomo);
-  let value,error;try{value=await getThroughProxy(port,targetPort)}catch(e){error=e}
+  let value,error;const deadline=Date.now()+3000;
+  do{try{value=await getThroughProxy(port,targetPort);error=null;break}catch(e){error=e}if(expectFailure)break;await new Promise(r=>setTimeout(r,40))}while(Date.now()<deadline);
   mihomo.kill();await new Promise(resolve=>mihomo.exitCode!==null?resolve():mihomo.once('exit',resolve));
   if(expectFailure){assert(error,'Unpatched core unexpectedly passed modern minimum-client version');console.log('Confirmed stock failure: '+fingerprint)}else{assert.ifError(error);assert.equal(value,'local-xray-interop-ok');console.log('PASS: Xray 26.10.31 REALITY/Vision, minimum client 26.3.27, '+fingerprint)}
  }

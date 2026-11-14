@@ -1,7 +1,7 @@
 //! Installed whole-device broker. Its IPC accepts data and fixed operations, never privileged paths.
 use serde_json::Value;
 
-const PROTOCOL: u32 = 1;
+const PROTOCOL: u32 = 2;
 const MAX_MESSAGE: usize = 4 * 1024 * 1024;
 
 fn allowed_api(method: &str, path: &str, body: &Option<Value>) -> bool {
@@ -405,10 +405,20 @@ mod windows {
             }
             if let Some(sid) = argument.strip_prefix("--install-helper=") {
                 return Some(if crate::core::is_admin() {
-                    install(sid)
+                    install(sid, false)
                 } else {
                     Err("Administrator access is required.".into())
                 });
+            }
+            if let Some(sid) = argument.strip_prefix("--update-helper=") {
+                return Some((|| {
+                    if !crate::core::is_admin() || !valid_sid(sid) || owner()? != sid {
+                        return Err(
+                            "The helper update requires its owner and administrator access.".into(),
+                        );
+                    }
+                    install(sid, true)
+                })());
             }
             if argument == "--remove-helper" {
                 return Some((|| {
@@ -421,7 +431,7 @@ mod windows {
                         }
                         return elevated("--remove-helper");
                     }
-                    remove()
+                    remove(true)
                 })());
             }
         }
@@ -451,12 +461,12 @@ mod windows {
         std::io::copy(&mut source, &mut target).map_err(|e| e.to_string())?;
         Ok(())
     }
-    fn install(sid: &str) -> Result<(), String> {
+    fn install(sid: &str, replace: bool) -> Result<(), String> {
         if !valid_sid(sid) {
             return Err("Invalid helper owner.".into());
         }
         let target = install_dir()?;
-        if target.exists() || open_service(SERVICE_QUERY_STATUS).is_ok() {
+        if !replace && (target.exists() || open_service(SERVICE_QUERY_STATUS).is_ok()) {
             return Err("A helper is already installed. Remove it before reinstalling.".into());
         }
         let source = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -492,6 +502,12 @@ mod windows {
                 }
             }
             std::fs::write(stage.join("owner.sid"), sid).map_err(|e| e.to_string())?;
+            std::fs::write(stage.join("protocol.version"), PROTOCOL.to_string())
+                .map_err(|e| e.to_string())?;
+            if replace {
+                // Verify and stage the complete replacement before stopping the installed helper.
+                remove(false)?;
+            }
             std::fs::rename(&stage, &target).map_err(|e| e.to_string())?;
             published = true;
             let manager = scm(SC_MANAGER_CREATE_SERVICE)?;
@@ -574,6 +590,13 @@ mod windows {
         }
         if owner()? != sid {
             return Err("The helper belongs to another Windows user.".into());
+        }
+        let installed = std::fs::read_to_string(install_dir()?.join("protocol.version"))
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(1);
+        if installed != PROTOCOL {
+            elevated(&format!("--update-helper={sid}"))?;
         }
         let service = open_service(SERVICE_START | SERVICE_QUERY_STATUS)?;
         if unsafe { StartServiceW(service.0, 0, null()) } == 0
@@ -1210,7 +1233,7 @@ mod windows {
             Ok(())
         }
     }
-    fn remove() -> Result<(), String> {
+    fn remove(allow_reboot: bool) -> Result<(), String> {
         let target = install_dir()?;
         no_reparse(&target)?;
         let manager = scm(SC_MANAGER_CONNECT)?;
@@ -1226,6 +1249,17 @@ mod windows {
         }
         if !service.is_null() {
             let service = Service(service);
+            let pid = service_pid(&service)?;
+            let process = if pid == 0 {
+                None
+            } else {
+                let process = unsafe { OpenProcess(SYNCHRONIZATION_SYNCHRONIZE, 0, pid) };
+                if process.is_null() && service_pid(&service)? == 0 {
+                    None
+                } else {
+                    Some(handle(process)?)
+                }
+            };
             let mut status: SERVICE_STATUS = unsafe { std::mem::zeroed() };
             unsafe {
                 ControlService(service.0, SERVICE_CONTROL_STOP, &mut status);
@@ -1239,6 +1273,13 @@ mod windows {
                     "The helper could not be stopped. Restart Windows and uninstall again.".into(),
                 );
             }
+            if let Some(process) = process {
+                if unsafe { WaitForSingleObject(raw(&process), 15_000) } != WAIT_OBJECT_0 {
+                    return Err(
+                        "The helper process did not exit. Restart Windows and try again.".into(),
+                    );
+                }
+            }
             if unsafe { DeleteService(service.0) } == 0 {
                 return Err(error());
             }
@@ -1248,22 +1289,32 @@ mod windows {
             no_reparse(&runtime)?;
             std::fs::remove_dir_all(runtime).map_err(|e| e.to_string())?;
         }
-        for name in FILES.into_iter().chain(["owner.sid", EXE]) {
+        for name in FILES
+            .into_iter()
+            .chain(["owner.sid", "protocol.version", EXE])
+        {
             let file = target.join(name);
             if std::fs::remove_file(&file).is_err()
                 && file.exists()
-                && unsafe {
-                    MoveFileExW(
-                        wide(&file.to_string_lossy()).as_ptr(),
-                        null(),
-                        MOVEFILE_DELAY_UNTIL_REBOOT,
-                    )
-                } == 0
+                && (!allow_reboot
+                    || unsafe {
+                        MoveFileExW(
+                            wide(&file.to_string_lossy()).as_ptr(),
+                            null(),
+                            MOVEFILE_DELAY_UNTIL_REBOOT,
+                        )
+                    } == 0)
             {
                 return Err(error());
             }
         }
         if std::fs::remove_dir(&target).is_err() {
+            if !allow_reboot {
+                return Err(
+                    "The old helper files could not be removed. Restart Windows and try again."
+                        .into(),
+                );
+            }
             unsafe {
                 MoveFileExW(
                     wide(&target.to_string_lossy()).as_ptr(),
@@ -1380,7 +1431,7 @@ mod windows {
         struct Cleanup;
         impl Drop for Cleanup {
             fn drop(&mut self) {
-                if let Err(error) = remove() {
+                if let Err(error) = remove(true) {
                     eprintln!("Helper test cleanup failed: {error}");
                 }
             }
@@ -1406,7 +1457,7 @@ mod windows {
             );
             let executable = std::env::var_os("AKIMOV_SERVICE_TEST_EXE").expect("Build the app first and set AKIMOV_SERVICE_TEST_EXE to target/debug/akimov-vpn.exe");
             assert!(
-                Command::new(executable)
+                Command::new(&executable)
                     .arg(format!("--install-helper={}", current_sid().unwrap()))
                     .creation_flags(CREATE_NO_WINDOW)
                     .status()
@@ -1415,6 +1466,26 @@ mod windows {
                 "Helper installation failed"
             );
             let _cleanup = Cleanup;
+            ensure_running().unwrap();
+            assert_ne!(
+                service_pid(&open_service(SERVICE_QUERY_STATUS).unwrap()).unwrap(),
+                0
+            );
+            let marker = install_dir().unwrap().join("protocol.version");
+            std::fs::write(&marker, "1").unwrap();
+            assert!(
+                Command::new(&executable)
+                    .arg(format!("--update-helper={}", current_sid().unwrap()))
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .status()
+                    .unwrap()
+                    .success(),
+                "Legacy helper update failed"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&marker).unwrap(),
+                PROTOCOL.to_string()
+            );
             {
                 let _filtered = Filtered::enter();
                 assert!(
@@ -1427,6 +1498,10 @@ mod windows {
                         .open(install_dir().unwrap().join("owner.sid"))
                         .is_err(),
                     "A standard user can rewrite the helper owner"
+                );
+                assert!(
+                    OpenOptions::new().write(true).open(&marker).is_err(),
+                    "A standard user can rewrite the helper compatibility version"
                 );
                 for _ in 0..2 {
                     let (yaml, ctl, token) = fixture();

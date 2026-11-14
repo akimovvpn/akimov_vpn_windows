@@ -203,6 +203,58 @@ fn free_port() -> Result<u16, String> {
         .map_err(|e| e.to_string())
 }
 
+// The controller opens before rule providers finish loading; only ordinary traffic proves readiness.
+fn traffic_ready(mixed: u16) -> bool {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    (|| -> std::io::Result<bool> {
+        let target = TcpListener::bind("127.0.0.1:0")?;
+        target.set_nonblocking(true)?;
+        let mut client = TcpStream::connect_timeout(
+            &([127, 0, 0, 1], mixed).into(),
+            Duration::from_millis(100),
+        )?;
+        client.set_write_timeout(Some(Duration::from_millis(100)))?;
+        let address = target.local_addr()?;
+        write!(
+            client,
+            "CONNECT {address} HTTP/1.1\r\nHost: {address}\r\n\r\nr"
+        )?;
+        let deadline = Instant::now() + Duration::from_millis(100);
+        loop {
+            match target.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_read_timeout(Some(Duration::from_millis(100)))?;
+                    let mut byte = [0];
+                    stream.read_exact(&mut byte)?;
+                    return Ok(byte == *b"r");
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        return Ok(false);
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    })()
+    .unwrap_or(false)
+}
+
+fn dns_ready(server: &str) -> bool {
+    (|| -> std::io::Result<bool> {
+        let socket = std::net::UdpSocket::bind("0.0.0.0:0")?;
+        socket.set_read_timeout(Some(Duration::from_millis(150)))?;
+        socket.connect(server)?;
+        let query = b"\x51\x23\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x05ready\x07invalid\x00\x00\x01\x00\x01";
+        socket.send(query)?;
+        let mut response = [0; 512];
+        let n = socket.recv(&mut response)?;
+        Ok(n >= 12 && response[..2] == query[..2] && response[2] & 0x80 != 0)
+    })().unwrap_or(false)
+}
+
 /// Cryptographic randomness from Windows, also used for the device id.
 pub(crate) fn random_hex() -> String {
     use windows_sys::Win32::Security::Cryptography::{
@@ -752,16 +804,23 @@ impl Engine {
             &dir.join("core/core.log"),
             tun && !is_admin(),
         )?;
-        // connected means the controller answers; poll fast so a warm start takes a fraction of a second
+        // Wait for provider loading and ordinary traffic, not just the early controller listener.
         let deadline = Instant::now() + Duration::from_secs(25);
+        let mut waiting_for_dns = false;
         loop {
             if self.closing.load(SeqCst) || self.gen.load(SeqCst) != attempt {
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err("Connection cancelled.".into());
             }
-            if self.api(ctl, &secret, "GET", "/version", None, 1).is_ok() && (!tun || tun_ready()) {
-                break;
+            if self.api(ctl, &secret, "GET", "/version", None, 1).is_ok()
+                && (!tun || tun_ready())
+                && traffic_ready(mixed)
+            {
+                if !tun || dns_ready("198.19.0.2:53") {
+                    break;
+                }
+                waiting_for_dns = true;
             }
             if let Ok(Some(code)) = child.try_wait() {
                 return Err(format!(
@@ -771,6 +830,9 @@ impl Engine {
             if Instant::now() > deadline {
                 let _ = child.kill();
                 let _ = child.wait();
+                if waiting_for_dns {
+                    return Err("Whole-device DNS did not answer. Another VPN may be blocking this adapter. Use Browser only while its TUN is active.".into());
+                }
                 let details =
                     std::fs::read_to_string(dir.join("core/core.log")).unwrap_or_default();
                 let last = details
@@ -1439,6 +1501,88 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dns_readiness_requires_a_matching_dns_response() {
+        use std::net::UdpSocket;
+        for valid in [true, false] {
+            let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let address = server.local_addr().unwrap().to_string();
+            let fixture = std::thread::spawn(move || {
+                server
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut packet = [0; 512];
+                let (n, peer) = server.recv_from(&mut packet).unwrap();
+                packet[2] |= 0x80;
+                if !valid {
+                    packet[0] ^= 1;
+                }
+                server.send_to(&packet[..n], peer).unwrap();
+            });
+            assert_eq!(dns_ready(&address), valid);
+            fixture.join().unwrap();
+        }
+    }
+    #[test]
+    fn windows_proxy_waits_for_rule_providers_before_ready() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let provider = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = provider.local_addr().unwrap().port();
+        let (release, wait) = std::sync::mpsc::channel();
+        let fixture = std::thread::spawn(move || {
+            let (mut stream, _) = provider.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut request = [0; 4096];
+            assert!(stream.read(&mut request).unwrap() > 0);
+            let _ = wait.recv_timeout(Duration::from_secs(5));
+            let body = "payload: ['example.invalid']\n";
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        });
+        let mixed = free_port().unwrap();
+        let ctl = free_port().unwrap();
+        let dir = data_dir().join(format!("latency-ready-{}", random_hex()));
+        std::fs::create_dir(&dir).unwrap();
+        let files = ProbeDir {
+            path: dir.clone(),
+            base: data_dir().canonicalize().unwrap(),
+        };
+        let cfg = dir.join("config.yaml");
+        std::fs::write(&cfg, format!("mixed-port: {mixed}\nexternal-controller: 127.0.0.1:{ctl}\ndns: {{enable: false}}\ntun: {{enable: false}}\nrule-providers:\n  delayed: {{type: http, behavior: domain, url: 'http://127.0.0.1:{port}/rules', path: ./rules.yaml}}\nrules: ['RULE-SET,delayed,DIRECT', 'MATCH,DIRECT']\n")).unwrap();
+        let child = crate::process::Process::spawn(
+            &core_exe().unwrap(),
+            &dir,
+            &cfg,
+            &dir.join("core.log"),
+            false,
+        )
+        .unwrap();
+        let engine = Engine::new();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while engine.api(ctl, "", "GET", "/version", None, 1).is_err() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            !traffic_ready(mixed),
+            "controller readiness does not mean traffic is accepted"
+        );
+        release.send(()).unwrap();
+        fixture.join().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !traffic_ready(mixed) {
+            assert!(Instant::now() < deadline, "traffic never became ready");
+        }
+        drop(child);
+        drop(files);
+    }
     #[test]
     fn restoring_choices_skips_removed_or_renamed_profile_and_provider_members() {
         let snapshot = json!({"proxies":{
