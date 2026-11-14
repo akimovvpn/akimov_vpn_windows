@@ -5,7 +5,7 @@ const PROTOCOL: u32 = 1;
 const MAX_MESSAGE: usize = 4 * 1024 * 1024;
 
 fn allowed_api(method: &str, path: &str, body: &Option<Value>) -> bool {
-    fn segment(value: &str) -> bool {
+    fn segment(value: &str, proxy_name: bool) -> bool {
         if value.is_empty()
             || !value
                 .bytes()
@@ -32,7 +32,7 @@ fn allowed_api(method: &str, path: &str, body: &Option<Value>) -> bool {
             && decoded != b".."
             && !decoded
                 .iter()
-                .any(|b| b.is_ascii_control() || b"/\\".contains(b))
+                .any(|b| b.is_ascii_control() || *b == b'\\' || (!proxy_name && *b == b'/'))
     }
     if method == "GET" && body.is_none() {
         if ["/version", "/proxies", "/connections", "/traffic"].contains(&path) {
@@ -43,7 +43,7 @@ fn allowed_api(method: &str, path: &str, body: &Option<Value>) -> bool {
             .and_then(|p| p.split_once("/delay?"))
         {
             let fields: Vec<_> = url::form_urlencoded::parse(query.as_bytes()).collect();
-            return segment(node)
+            return segment(node, true)
                 && query.len() <= 4096
                 && fields.len() == 3
                 && fields.iter().filter(|(key, _)| key == "url").count() == 1
@@ -65,7 +65,9 @@ fn allowed_api(method: &str, path: &str, body: &Option<Value>) -> bool {
         }
     }
     if method == "DELETE" && body.is_none() {
-        return path.strip_prefix("/connections/").is_some_and(segment);
+        return path
+            .strip_prefix("/connections/")
+            .is_some_and(|name| segment(name, false));
     }
     if method == "PATCH" && path == "/configs" {
         return body.as_ref() == Some(&serde_json::json!({"tun":{"enable":false}}));
@@ -84,7 +86,9 @@ fn allowed_api(method: &str, path: &str, body: &Option<Value>) -> bool {
             .is_some_and(|s| s.len() < MAX_MESSAGE);
     }
     method == "PUT"
-        && path.strip_prefix("/proxies/").is_some_and(segment)
+        && path
+            .strip_prefix("/proxies/")
+            .is_some_and(|name| segment(name, true))
         && object
             .get("name")
             .and_then(Value::as_str)
@@ -1652,7 +1656,13 @@ mod tests {
             &Some(json!({"name":"B","extra":"x"}))
         ));
         assert!(!allowed_api("GET", "/version", &Some(json!({}))));
-        for node in ["Germany%20%231", "Name%3F", "100%25", "%252e"] {
+        for node in [
+            "Germany%20%231",
+            "Name%3F",
+            "100%25",
+            "%252e",
+            "Auto%20WiFi%2FLTE%20%231%3F100%25",
+        ] {
             assert!(
                 allowed_api(
                     "PUT",
@@ -1667,14 +1677,16 @@ mod tests {
                 !allowed_api("DELETE", &format!("/connections/{node}"), &None),
                 "{node}"
             );
-            assert!(
-                !allowed_api(
-                    "PUT",
-                    &format!("/proxies/{node}"),
-                    &Some(json!({"name":"B"}))
-                ),
-                "{node}"
-            );
+            if node != "%2F" {
+                assert!(
+                    !allowed_api(
+                        "PUT",
+                        &format!("/proxies/{node}"),
+                        &Some(json!({"name":"B"}))
+                    ),
+                    "{node}"
+                );
+            }
         }
         assert!(!allowed_api(
             "GET",
